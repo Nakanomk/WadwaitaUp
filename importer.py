@@ -200,7 +200,8 @@ def parse_json_courses(text: str) -> tuple[list[Course], list[str]]:
         # Parse day (int or string)
         day_raw = item.get('day', 1)
         if isinstance(day_raw, str):
-            day = _WEEKDAY_MAP.get(day_raw.strip()) or _WEEKDAY_MAP.get(day_raw.strip().upper())
+            day_stripped = day_raw.strip()
+            day = _WEEKDAY_MAP.get(day_stripped) or _WEEKDAY_MAP.get(day_stripped.upper())
             if day is None:
                 warnings.append(f"第 {idx} 项 day 值「{day_raw}」无法识别，已跳过")
                 continue

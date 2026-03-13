@@ -757,8 +757,6 @@ class OnboardingDialog(Gtk.Dialog):
         last = len(self._STEPS) - 1
         if idx == last:
             self._next_btn.set_label("开始使用！")
-            self._next_btn.remove_css_class("suggested-action")
-            self._next_btn.add_css_class("suggested-action")
         else:
             self._next_btn.set_label("下一步")
 
@@ -790,7 +788,7 @@ class ImportCoursesDialog(Gtk.Dialog):
         self.set_default_size(520, 520)
         self._imported_courses: list[Course] = []
 
-        cancel_btn = self.add_button("取消", Gtk.ResponseType.CANCEL)  # noqa: F841
+        self.add_button("取消", Gtk.ResponseType.CANCEL)
         self._ok_btn = self.add_button("导入", Gtk.ResponseType.OK)
         self._ok_btn.add_css_class("suggested-action")
         self._ok_btn.set_sensitive(False)
@@ -898,7 +896,8 @@ class ImportCoursesDialog(Gtk.Dialog):
             if gfile:
                 path = gfile.get_path()
                 try:
-                    text = open(path, encoding="utf-8").read()
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
                 except Exception as exc:
                     self._show_error(f"读取文件失败：{exc}")
                     return
