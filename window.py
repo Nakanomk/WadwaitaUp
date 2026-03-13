@@ -1,8 +1,10 @@
 import uuid
+import calendar as _cal
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk, Adw, Gdk, Pango
+from datetime import datetime, date, timedelta
 
 from models import Course, ClassPeriod, Schedule
 from storage import ScheduleStorage, SettingsStorage
@@ -14,7 +16,130 @@ from utils import (
     humanize_delta_minutes,
     is_valid_hhmm,
     calc_current_week,
+    hhmm_to_minutes,
 )
+
+# ─────────────────────────── CSS ────────────────────────────────
+
+_APP_CSS = """
+/* ── Course cards (week grid) ─────────────────────────────────── */
+.course-card {
+    border-radius: 8px;
+    padding: 4px 6px;
+    min-width: 56px;
+    min-height: 50px;
+    margin: 1px;
+}
+
+/* ── Week grid ────────────────────────────────────────────────── */
+.week-period-label {
+    min-width: 44px;
+    min-height: 50px;
+}
+
+/* ── Month calendar ───────────────────────────────────────────── */
+.month-day-cell {
+    min-width: 44px;
+    min-height: 64px;
+    border-radius: 8px;
+    padding: 4px;
+    margin: 1px;
+}
+.month-today-cell {
+    background-color: alpha(@accent_color, 0.12);
+}
+.month-today-num {
+    color: @accent_color;
+    font-weight: bold;
+}
+.month-other-num {
+    opacity: 0.6;
+}
+"""
+
+_CSS_LOADED = False
+_CSS_CLASSES_REGISTERED: set = set()
+
+
+def _load_app_css() -> None:
+    global _CSS_LOADED
+    if _CSS_LOADED:
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_string(_APP_CSS)
+    display = Gdk.Display.get_default()
+    if display:
+        Gtk.StyleContext.add_provider_for_display(
+            display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+    _CSS_LOADED = True
+
+
+def _ensure_color_class(class_name: str, bg: str, fg: str) -> None:
+    """Register a global CSS class for a course color, once per class name."""
+    if class_name in _CSS_CLASSES_REGISTERED:
+        return
+    css = f".{class_name} {{ background-color: {bg}; color: {fg}; }}"
+    provider = Gtk.CssProvider()
+    provider.load_from_string(css)
+    display = Gdk.Display.get_default()
+    if display:
+        Gtk.StyleContext.add_provider_for_display(
+            display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 10
+        )
+    _CSS_CLASSES_REGISTERED.add(class_name)
+
+
+# ─────────────────────── Color palette ──────────────────────────
+
+_COURSE_COLORS = [
+    ("#3584e4", "#ffffff"),  # blue
+    ("#e5a50a", "#000000"),  # amber
+    ("#33d17a", "#000000"),  # green
+    ("#ff7800", "#ffffff"),  # orange
+    ("#9141ac", "#ffffff"),  # purple
+    ("#ed333b", "#ffffff"),  # red
+    ("#26a269", "#ffffff"),  # teal
+    ("#986a44", "#ffffff"),  # brown
+    ("#1b6acb", "#ffffff"),  # indigo
+    ("#c64600", "#ffffff"),  # deep-orange
+]
+
+
+def _assign_colors(courses: list) -> dict:
+    """Return {course_id: (bg, fg)} assigned deterministically by sorted id."""
+    result = {}
+    for i, c in enumerate(sorted(courses, key=lambda x: x.id)):
+        result[c.id] = _COURSE_COLORS[i % len(_COURSE_COLORS)]
+    return result
+
+
+def _course_css_class(course_id: str) -> str:
+    return "cc-" + course_id.replace("-", "")[:20]
+
+
+# ─────────────────────── Period helpers ─────────────────────────
+
+def _get_period_span(course: Course, periods: list) -> tuple:
+    """
+    Return (start_idx, span): the 0-based index of the first period
+    contained in this course and how many consecutive periods it covers.
+    Uses ±5 min tolerance so exact-match schedules always work.
+    Returns (None, 0) when no periods match.
+    """
+    c_start = hhmm_to_minutes(course.start)
+    c_end = hhmm_to_minutes(course.end)
+    first = last = None
+    for i, p in enumerate(periods):
+        ps = hhmm_to_minutes(p.start)
+        pe = hhmm_to_minutes(p.end)
+        if (c_start - 5) <= ps and pe <= (c_end + 5):
+            if first is None:
+                first = i
+            last = i
+    if first is None:
+        return None, 0
+    return first, last - first + 1
 
 # ─────────────────────────── helpers ────────────────────────────
 
@@ -352,6 +477,355 @@ class GlobalSettingsDialog(Gtk.Dialog):
         dlg.present()
 
 
+# ──────────────────────────── Week Grid View ────────────────────
+
+
+class WeekGridView(Gtk.ScrolledWindow):
+    """
+    Full-week timetable grid.
+    Columns = Mon–Sun, rows = class periods, courses = coloured cards.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.set_hexpand(True)
+        self.set_vexpand(True)
+        self.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+        self._courses: list = []
+        self._periods: list = []
+        self._color_map: dict = {}
+
+        wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        wrapper.set_margin_top(8)
+        wrapper.set_margin_bottom(8)
+        wrapper.set_margin_start(8)
+        wrapper.set_margin_end(8)
+
+        self._grid = Gtk.Grid()
+        self._grid.set_row_spacing(2)
+        self._grid.set_column_spacing(2)
+        wrapper.append(self._grid)
+        self.set_child(wrapper)
+
+    # ── public ──────────────────────────────────────────────────
+
+    def refresh(self, courses: list, periods: list) -> None:
+        self._courses = courses
+        self._periods = periods
+        self._color_map = _assign_colors(courses)
+        today_wd = datetime.now().weekday() + 1  # 1=Mon … 7=Sun
+        self._build(today_wd)
+
+    # ── internals ───────────────────────────────────────────────
+
+    def _clear(self) -> None:
+        child = self._grid.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._grid.remove(child)
+            child = nxt
+
+    def _build(self, today_wd: int) -> None:
+        self._clear()
+
+        today      = date.today()
+        week_start = today - timedelta(days=today.weekday())   # Monday
+        week_dates = [week_start + timedelta(days=i) for i in range(7)]
+
+        # ── Header row ────────────────────────────────────────
+        corner = Gtk.Label(label="节次")
+        corner.add_css_class("caption")
+        corner.add_css_class("dim-label")
+        corner.set_margin_top(4)
+        corner.set_margin_bottom(8)
+        self._grid.attach(corner, 0, 0, 1, 1)
+
+        for col in range(1, 8):
+            wd = col
+            d  = week_dates[wd - 1]
+            is_today = (wd == today_wd)
+
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            vbox.set_halign(Gtk.Align.CENTER)
+            vbox.set_margin_bottom(8)
+
+            name_lbl = Gtk.Label(label=WEEKDAY_CN[wd])
+            name_lbl.add_css_class("caption-heading")
+            if is_today:
+                name_lbl.add_css_class("accent")
+
+            date_lbl = Gtk.Label(label=f"{d.month}/{d.day}")
+            date_lbl.add_css_class("caption")
+            if is_today:
+                date_lbl.add_css_class("accent")
+            else:
+                date_lbl.add_css_class("dim-label")
+
+            vbox.append(name_lbl)
+            vbox.append(date_lbl)
+            self._grid.attach(vbox, col, 0, 1, 1)
+
+        # ── No periods configured ──────────────────────────────
+        if not self._periods:
+            lbl = Gtk.Label(label="请在全局设置中配置节次时间")
+            lbl.add_css_class("dim-label")
+            lbl.set_margin_top(24)
+            self._grid.attach(lbl, 0, 1, 8, 1)
+            return
+
+        # ── Compute placements, tracking occupied cells ─────────
+        occupied: set   = set()
+        placements: list = []          # (course, col, grid_row, span)
+
+        for course in self._courses:
+            pidx, span = _get_period_span(course, self._periods)
+            if pidx is None:
+                continue
+            col      = course.day
+            grid_row = pidx + 1        # +1 for header row
+            # Skip if conflicting with already-placed course
+            if any((col, grid_row + k) in occupied for k in range(span)):
+                continue
+            for k in range(span):
+                occupied.add((col, grid_row + k))
+            placements.append((course, col, grid_row, span))
+
+        # ── Period labels + empty-cell placeholders ─────────────
+        for ridx, period in enumerate(self._periods):
+            grid_row = ridx + 1
+
+            pbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            pbox.set_halign(Gtk.Align.CENTER)
+            pbox.set_valign(Gtk.Align.CENTER)
+            pbox.set_size_request(44, 54)
+            pbox.add_css_class("week-period-label")
+
+            n_lbl = Gtk.Label(label=str(period.period))
+            n_lbl.add_css_class("caption-heading")
+            t_lbl = Gtk.Label(label=period.start)
+            t_lbl.add_css_class("caption")
+            t_lbl.add_css_class("dim-label")
+            pbox.append(n_lbl)
+            pbox.append(t_lbl)
+            self._grid.attach(pbox, 0, grid_row, 1, 1)
+
+            for col in range(1, 8):
+                if (col, grid_row) not in occupied:
+                    ph = Gtk.Box()
+                    ph.set_size_request(64, 54)
+                    self._grid.attach(ph, col, grid_row, 1, 1)
+
+        # ── Course cards ──────────────────────────────────────
+        for course, col, grid_row, span in placements:
+            bg, fg = self._color_map.get(course.id, ("#888888", "#ffffff"))
+            card   = self._make_card(course, bg, fg, span)
+            self._grid.attach(card, col, grid_row, 1, span)
+
+    def _make_card(self, course: Course, bg: str, fg: str, span: int) -> Gtk.Widget:
+        cls = _course_css_class(course.id)
+        _ensure_color_class(cls, bg, fg)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_halign(Gtk.Align.FILL)
+        box.set_valign(Gtk.Align.FILL)
+        box.set_hexpand(True)
+        box.add_css_class("course-card")
+        box.add_css_class(cls)
+
+        name_lbl = Gtk.Label(label=course.name)
+        name_lbl.set_wrap(True)
+        name_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        name_lbl.set_max_width_chars(5)
+        name_lbl.add_css_class("caption-heading")
+        name_lbl.set_justify(Gtk.Justification.CENTER)
+        box.append(name_lbl)
+
+        if course.location and span >= 2:
+            loc_lbl = Gtk.Label(label=course.location)
+            loc_lbl.add_css_class("caption")
+            loc_lbl.set_justify(Gtk.Justification.CENTER)
+            loc_lbl.set_wrap(True)
+            loc_lbl.set_max_width_chars(5)
+            box.append(loc_lbl)
+
+        return box
+
+
+# ──────────────────────────── Month View ────────────────────────
+
+
+class MonthView(Gtk.Box):
+    """Monthly calendar: 7-column grid with per-day course pills."""
+
+    _MONTH_CN = ["", "一月", "二月", "三月", "四月", "五月", "六月",
+                 "七月", "八月", "九月", "十月", "十一月", "十二月"]
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.set_margin_top(12)
+        self.set_margin_bottom(12)
+        self.set_margin_start(12)
+        self.set_margin_end(12)
+
+        self._year:  int  = date.today().year
+        self._month: int  = date.today().month
+        self._courses:   list = []
+        self._color_map: dict = {}
+
+        # ── Navigation bar ────────────────────────────────────
+        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        nav.set_halign(Gtk.Align.CENTER)
+        nav.set_margin_bottom(12)
+
+        prev_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        prev_btn.add_css_class("flat")
+        prev_btn.connect("clicked", self._on_prev)
+
+        self._nav_label = Gtk.Label()
+        self._nav_label.add_css_class("title-3")
+        self._nav_label.set_width_chars(10)
+        self._nav_label.set_xalign(0.5)
+
+        next_btn = Gtk.Button(icon_name="go-next-symbolic")
+        next_btn.add_css_class("flat")
+        next_btn.connect("clicked", self._on_next)
+
+        nav.append(prev_btn)
+        nav.append(self._nav_label)
+        nav.append(next_btn)
+        self.append(nav)
+
+        # ── Day-of-week header ────────────────────────────────
+        dow_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        dow_box.set_homogeneous(True)
+        dow_box.set_margin_bottom(4)
+        for name in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]:
+            lbl = Gtk.Label(label=name)
+            lbl.add_css_class("caption-heading")
+            lbl.add_css_class("dim-label")
+            lbl.set_margin_top(4)
+            lbl.set_margin_bottom(4)
+            dow_box.append(lbl)
+        self.append(dow_box)
+
+        # ── Calendar grid ─────────────────────────────────────
+        self._grid = Gtk.Grid()
+        self._grid.set_row_spacing(2)
+        self._grid.set_column_spacing(2)
+        self._grid.set_row_homogeneous(True)
+        self._grid.set_column_homogeneous(True)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_child(self._grid)
+        sw.set_vexpand(True)
+        sw.set_hexpand(True)
+        self.append(sw)
+
+    # ── public ──────────────────────────────────────────────────
+
+    def refresh(self, courses: list, color_map: dict) -> None:
+        self._courses = courses
+        self._color_map = color_map
+        self._rebuild()
+
+    # ── internals ───────────────────────────────────────────────
+
+    def _rebuild(self) -> None:
+        child = self._grid.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._grid.remove(child)
+            child = nxt
+
+        self._nav_label.set_text(
+            f"{self._year} 年 {self._MONTH_CN[self._month]}"
+        )
+
+        today  = date.today()
+        matrix = _cal.monthcalendar(self._year, self._month)
+        while len(matrix) < 6:
+            matrix.append([0] * 7)
+
+        # courses_by_wd: 1-7 -> [courses on that weekday]
+        courses_by_wd: dict = {wd: [] for wd in range(1, 8)}
+        for c in self._courses:
+            courses_by_wd[c.day].append(c)
+
+        for row, week in enumerate(matrix):
+            for col, day_num in enumerate(week):
+                wd   = col + 1    # 1=Mon … 7=Sun
+                cell = self._make_cell(day_num, wd, today, courses_by_wd[wd])
+                self._grid.attach(cell, col, row, 1, 1)
+
+    def _make_cell(self, day_num: int, wd: int, today: date,
+                   day_courses: list) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_size_request(44, 68)
+        box.add_css_class("month-day-cell")
+
+        if day_num == 0:
+            return box   # padding cell outside the month
+
+        is_today = (day_num == today.day and
+                    self._year == today.year and
+                    self._month == today.month)
+        if is_today:
+            box.add_css_class("month-today-cell")
+
+        num_lbl = Gtk.Label(label=str(day_num))
+        num_lbl.set_halign(Gtk.Align.START)
+        num_lbl.add_css_class("month-today-num" if is_today else "month-other-num")
+        box.append(num_lbl)
+
+        # Course pills (max 3 visible)
+        for c in day_courses[:3]:
+            bg, fg = self._color_map.get(c.id, ("#888888", "#ffffff"))
+            cls    = _course_css_class(c.id)
+            _ensure_color_class(cls, bg, fg)
+
+            pill = Gtk.Label(label=(c.name[:5] + ("…" if len(c.name) > 5 else "")))
+            pill.add_css_class("caption")
+            pill.add_css_class(cls)
+            pill.set_halign(Gtk.Align.FILL)
+            pill.set_xalign(0.0)
+
+            # Round the pill slightly
+            provider = Gtk.CssProvider()
+            provider.load_from_string(
+                "label { border-radius: 4px; padding: 1px 3px; }"
+            )
+            pill.get_style_context().add_provider(
+                provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 5
+            )
+            box.append(pill)
+
+        if len(day_courses) > 3:
+            more = Gtk.Label(label=f"+{len(day_courses) - 3}")
+            more.add_css_class("caption")
+            more.add_css_class("dim-label")
+            more.set_halign(Gtk.Align.START)
+            box.append(more)
+
+        return box
+
+    def _on_prev(self, _btn) -> None:
+        if self._month == 1:
+            self._year -= 1
+            self._month = 12
+        else:
+            self._month -= 1
+        self._rebuild()
+
+    def _on_next(self, _btn) -> None:
+        if self._month == 12:
+            self._year += 1
+            self._month = 1
+        else:
+            self._month += 1
+        self._rebuild()
+
+
 # ──────────────────────────── main window ───────────────────────
 
 
@@ -359,7 +833,9 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
         self.set_title("WadwaitaUp 课程表")
-        self.set_default_size(520, 760)
+        self.set_default_size(760, 800)
+
+        _load_app_css()
 
         self._schedule_storage = ScheduleStorage()
         self._settings_storage = SettingsStorage()
@@ -384,98 +860,131 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         toolbar_view.add_top_bar(header)
 
-        # Left: global settings button
+        # ── Header: left buttons ─────────────────────────────────
         settings_btn = Gtk.Button(icon_name="emblem-system-symbolic")
         settings_btn.set_tooltip_text("全局设置（节次时间 / 外观）")
         settings_btn.connect("clicked", self._on_global_settings_clicked)
         header.pack_start(settings_btn)
 
-        # Left: edit current schedule button
         edit_schedule_btn = Gtk.Button(icon_name="document-edit-symbolic")
         edit_schedule_btn.set_tooltip_text("编辑当前课表信息")
         edit_schedule_btn.connect("clicked", self._on_edit_schedule_clicked)
         header.pack_start(edit_schedule_btn)
 
-        # Center title widget: schedule switcher dropdown
+        # ── Header: center – ViewSwitcher + schedule dropdown ───
+        self._view_stack = Adw.ViewStack()
+
+        # ViewSwitcher sits in the header centre
+        view_switcher = Adw.ViewSwitcher()
+        view_switcher.set_stack(self._view_stack)
+        view_switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+
+        # Schedule switcher dropdown also lives in the centre box
         self._schedule_names_model = Gtk.StringList()
         self._rebuild_schedule_model()
-
         self._schedule_dropdown = Gtk.DropDown(
             model=self._schedule_names_model,
             selected=self._active_idx,
         )
         self._schedule_dropdown.set_tooltip_text("切换课表")
         self._schedule_dropdown.connect("notify::selected", self._on_schedule_switched)
-        header.set_title_widget(self._schedule_dropdown)
 
-        # Right: dark-mode toggle
+        center_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        center_box.set_halign(Gtk.Align.CENTER)
+        center_box.append(self._schedule_dropdown)
+        center_box.append(view_switcher)
+        header.set_title_widget(center_box)
+
+        # ── Header: right buttons ────────────────────────────────
         self._dark_btn = Gtk.ToggleButton(icon_name="weather-clear-night-symbolic")
         self._dark_btn.set_tooltip_text("切换深色/浅色模式")
         self._dark_btn.set_active(self._settings.get("color_scheme", "auto") == "dark")
         self._dark_btn.connect("toggled", self._on_dark_toggled)
         header.pack_end(self._dark_btn)
 
-        # Right: add course button
         add_btn = Gtk.Button(icon_name="list-add-symbolic")
         add_btn.set_tooltip_text("添加课程")
         add_btn.connect("clicked", self._on_add_clicked)
         header.pack_end(add_btn)
 
-        # Right: add schedule button
         add_schedule_btn = Gtk.Button(icon_name="folder-new-symbolic")
         add_schedule_btn.set_tooltip_text("新建课表")
         add_schedule_btn.connect("clicked", self._on_add_schedule_clicked)
         header.pack_end(add_schedule_btn)
 
-        # Right: delete schedule button
         self._del_schedule_btn = Gtk.Button(icon_name="edit-delete-symbolic")
         self._del_schedule_btn.set_tooltip_text("删除当前课表")
         self._del_schedule_btn.connect("clicked", self._on_delete_schedule_clicked)
         header.pack_end(self._del_schedule_btn)
 
-        # ── Body ────────────────────────────────────────────────
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        root.set_margin_top(12)
-        root.set_margin_bottom(12)
-        root.set_margin_start(12)
-        root.set_margin_end(12)
+        # ── View Stack: page 1 – Overview ────────────────────────
+        overview_scroll = Gtk.ScrolledWindow()
+        overview_scroll.set_policy(
+            Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC
+        )
+        self._overview_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12
+        )
+        self._overview_box.set_margin_top(12)
+        self._overview_box.set_margin_bottom(12)
+        self._overview_box.set_margin_start(16)
+        self._overview_box.set_margin_end(16)
+        overview_scroll.set_child(self._overview_box)
 
+        p_overview = self._view_stack.add_titled(overview_scroll, "overview", "概览")
+        p_overview.set_icon_name("view-list-symbolic")
+
+        # Overview inner widgets
         term_group = Adw.PreferencesGroup(title="学期信息")
-        self._term_row = Adw.ActionRow(title="未设置学期开始日期", subtitle="点击左上角铅笔图标设置")
+        self._term_row = Adw.ActionRow(
+            title="未设置学期开始日期", subtitle="点击左上角铅笔图标设置"
+        )
         term_group.add(self._term_row)
-        root.append(term_group)
+        self._overview_box.append(term_group)
 
         next_group = Adw.PreferencesGroup(title="下一节课")
         self._next_row = Adw.ActionRow(title="暂无课程", subtitle="请先添加课程")
         next_group.add(self._next_row)
-        root.append(next_group)
+        self._overview_box.append(next_group)
 
-        today_title = Gtk.Label(label="今天")
-        today_title.set_xalign(0)
-        today_title.add_css_class("title-4")
-        root.append(today_title)
-
+        today_group = Adw.PreferencesGroup(title="今天的课程")
         self._today_list = Gtk.ListBox()
         self._today_list.add_css_class("boxed-list")
         self._today_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        root.append(self._today_list)
+        today_group.add(self._today_list)
+        self._overview_box.append(today_group)
 
-        week_title = Gtk.Label(label="本周全部课程")
-        week_title.set_xalign(0)
-        week_title.add_css_class("title-4")
-        root.append(week_title)
-
+        all_group = Adw.PreferencesGroup(title="所有课程")
         self._week_list = Gtk.ListBox()
         self._week_list.add_css_class("boxed-list")
         self._week_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        root.append(self._week_list)
+        all_group.add(self._week_list)
+        self._overview_box.append(all_group)
 
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_child(root)
-        toolbar_view.set_content(scrolled)
+        # ── View Stack: page 2 – Week Grid ───────────────────────
+        self._week_grid = WeekGridView()
+        p_week = self._view_stack.add_titled(self._week_grid, "week", "周视图")
+        p_week.set_icon_name("view-grid-symbolic")
+
+        # ── View Stack: page 3 – Month Calendar ──────────────────
+        self._month_view = MonthView()
+        p_month = self._view_stack.add_titled(
+            self._month_view, "month", "月视图"
+        )
+        p_month.set_icon_name("x-office-calendar-symbolic")
+
+        # ── Bottom switcher bar (shown on narrow windows) ────────
+        switcher_bar = Adw.ViewSwitcherBar()
+        switcher_bar.set_stack(self._view_stack)
+        switcher_bar.set_reveal(True)
+        toolbar_view.add_bottom_bar(switcher_bar)
+
+        toolbar_view.set_content(self._view_stack)
         self.set_content(toolbar_view)
 
         self.refresh_ui()
+
+
 
     # ── schedule helpers ─────────────────────────────────────────
 
@@ -619,6 +1128,13 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             empty = Gtk.ListBoxRow()
             empty.set_child(Adw.ActionRow(title="还没有课程", subtitle="先添加几门课吧"))
             self._week_list.append(empty)
+
+        # ── Refresh grid views ──────────────────────────────────
+        periods = _periods_from_settings(self._settings)
+        self._week_grid.refresh(self._courses, periods)
+        color_map = _assign_colors(self._courses)
+        self._month_view.refresh(self._courses, color_map)
+
 
     # ── header button callbacks ──────────────────────────────────
 
