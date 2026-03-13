@@ -16,6 +16,37 @@ DEFAULT_CLASS_PERIODS = [
     {"period": 11, "start": "20:50", "end": "21:35"},
 ]
 
+# ── 华中科技大学 (HUST) standard class periods ──────────────────────
+# 夏令时 (Summer schedule, roughly March–October)
+HUST_SUMMER_PERIODS = [
+    {"period": 1,  "start": "08:00", "end": "08:50"},
+    {"period": 2,  "start": "08:55", "end": "09:45"},
+    {"period": 3,  "start": "10:05", "end": "10:55"},
+    {"period": 4,  "start": "11:00", "end": "11:50"},
+    {"period": 5,  "start": "14:00", "end": "14:50"},
+    {"period": 6,  "start": "14:55", "end": "15:45"},
+    {"period": 7,  "start": "16:05", "end": "16:55"},
+    {"period": 8,  "start": "17:00", "end": "17:50"},
+    {"period": 9,  "start": "19:00", "end": "19:50"},
+    {"period": 10, "start": "19:55", "end": "20:45"},
+    {"period": 11, "start": "20:50", "end": "21:40"},
+]
+
+# 冬令时 (Winter schedule, roughly November–February)
+HUST_WINTER_PERIODS = [
+    {"period": 1,  "start": "08:30", "end": "09:20"},
+    {"period": 2,  "start": "09:25", "end": "10:15"},
+    {"period": 3,  "start": "10:35", "end": "11:25"},
+    {"period": 4,  "start": "11:30", "end": "12:20"},
+    {"period": 5,  "start": "14:30", "end": "15:20"},
+    {"period": 6,  "start": "15:25", "end": "16:15"},
+    {"period": 7,  "start": "16:35", "end": "17:25"},
+    {"period": 8,  "start": "17:30", "end": "18:20"},
+    {"period": 9,  "start": "19:30", "end": "20:20"},
+    {"period": 10, "start": "20:25", "end": "21:15"},
+    {"period": 11, "start": "21:20", "end": "22:10"},
+]
+
 
 @dataclass
 class ClassPeriod:
