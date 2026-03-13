@@ -69,6 +69,7 @@ class SettingsStorage:
         "current_schedule_id": None,
         "color_scheme": "auto",   # "auto" | "light" | "dark"
         "class_periods": DEFAULT_CLASS_PERIODS,
+        "onboarding_done": False,
     }
 
     def __init__(self, path: str = "data/settings.json"):

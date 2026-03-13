@@ -53,6 +53,69 @@ _APP_CSS = """
 .month-other-num {
     opacity: 0.6;
 }
+
+/* ── Mascot card ──────────────────────────────────────────────── */
+.mascot-card {
+    border-radius: 16px;
+    padding: 14px 16px;
+    background-color: alpha(@accent_color, 0.08);
+    margin-bottom: 4px;
+}
+.mascot-card-urgent {
+    background-color: alpha(#e5a50a, 0.14);
+}
+.mascot-card-warn {
+    background-color: alpha(#ff7800, 0.12);
+}
+.mascot-card-happy {
+    background-color: alpha(#33d17a, 0.12);
+}
+.mascot-card-accent {
+    background-color: alpha(@accent_color, 0.14);
+}
+.mascot-emoji-bg {
+    min-width: 52px;
+    min-height: 52px;
+    border-radius: 26px;
+    background-color: alpha(@accent_color, 0.14);
+}
+.mascot-emoji {
+    font-size: 26px;
+}
+.mascot-title {
+    font-weight: bold;
+}
+
+/* ── Onboarding ───────────────────────────────────────────────── */
+.onboarding-page {
+    padding: 24px 16px;
+}
+.onboarding-icon {
+    font-size: 52px;
+    margin-bottom: 8px;
+}
+.onboarding-title {
+    font-size: 20px;
+    font-weight: bold;
+    margin-bottom: 6px;
+}
+.onboarding-body {
+    opacity: 0.8;
+}
+.dot-active {
+    min-width: 10px;
+    min-height: 10px;
+    border-radius: 5px;
+    background-color: @accent_color;
+    margin: 0 4px;
+}
+.dot-inactive {
+    min-width: 8px;
+    min-height: 8px;
+    border-radius: 4px;
+    background-color: alpha(@accent_color, 0.35);
+    margin: 0 4px;
+}
 """
 
 _CSS_LOADED = False
@@ -114,6 +177,76 @@ def _assign_colors(courses: list) -> dict:
 
 def _course_css_class(course_id: str) -> str:
     return "cc-" + course_id.replace("-", "")[:20]
+
+
+# ─────────────────────── Mascot helper ──────────────────────────
+
+def _get_mascot_info(courses: list, current_week: int | None) -> tuple[str, str, str]:
+    """Return (emoji, message, extra_css_class) for the mascot card."""
+    now = datetime.now()
+    hour = now.hour
+
+    if 5 <= hour < 12:
+        greeting = "早上好"
+    elif 12 <= hour < 14:
+        greeting = "午安"
+    elif 14 <= hour < 18:
+        greeting = "下午好"
+    elif 18 <= hour < 22:
+        greeting = "晚上好"
+    else:
+        greeting = "夜深了"
+
+    week_str = f"第 {current_week} 周 · " if current_week else ""
+    today_name = WEEKDAY_CN.get(now.weekday() + 1, "")
+    context = f"{week_str}{today_name}"
+
+    if not courses:
+        return (
+            "🌟",
+            f"{greeting}！添加几门课程，开始规划你的学期吧。\n{context}",
+            "",
+        )
+
+    next_course, delta = get_next_course(courses)
+    today_courses = get_today_courses(courses)
+
+    if next_course and delta is not None:
+        if delta == 0:
+            return (
+                "📚",
+                f"{greeting}！「{next_course.name}」现在正在上课。\n{context}",
+                "mascot-card-accent",
+            )
+        if delta < 30:
+            return (
+                "⏰",
+                f"{greeting}！「{next_course.name}」还有 {delta} 分钟就要开始了，快准备一下！\n{context}",
+                "mascot-card-urgent",
+            )
+        if delta < 90:
+            return (
+                "🎒",
+                f"{greeting}！「{next_course.name}」再过 {humanize_delta_minutes(delta)} 开始，别迟到哦。\n{context}",
+                "mascot-card-warn",
+            )
+
+    if not today_courses:
+        return (
+            "☕",
+            f"{greeting}！今天没有课，好好休息一下吧。\n{context}",
+            "mascot-card-happy",
+        )
+
+    if today_courses and next_course:
+        return (
+            "📅",
+            f"{greeting}！今天还有 {len(today_courses)} 节课，"
+            f"下一节「{next_course.name}」在 {next_course.start} 开始。\n{context}",
+            "",
+        )
+
+    return ("🌟", f"{greeting}！祝你今天学习愉快！\n{context}", "mascot-card-happy")
 
 
 # ─────────────────────── Period helpers ─────────────────────────
@@ -717,6 +850,360 @@ class GlobalSettingsDialog(Gtk.Dialog):
         dlg.present()
 
 
+# ──────────────────────────── Onboarding Dialog ─────────────────
+
+
+class OnboardingDialog(Gtk.Dialog):
+    """First-time user guide shown on first launch."""
+
+    _STEPS = [
+        {
+            "emoji": "🎓",
+            "title": "欢迎使用 WadwaitaUp！",
+            "body": (
+                "这是一款专为大学生设计的课程表管理应用。\n"
+                "轻松管理你的课程，再也不会忘记上课！"
+            ),
+        },
+        {
+            "emoji": "📅",
+            "title": "创建你的课表",
+            "body": (
+                "点击右上角的📁按钮新建课表，\n"
+                "输入学期名称和学期开始日期即可。\n"
+                "你可以为不同学期创建多个课表。"
+            ),
+        },
+        {
+            "emoji": "📚",
+            "title": "添加或导入课程",
+            "body": (
+                "点击右上角的 ＋ 按钮手动添加课程，\n"
+                "或使用「导入课程」按钮从教务系统\n"
+                "导出的 .ics 文件批量导入。"
+            ),
+        },
+        {
+            "emoji": "🌟",
+            "title": "开始使用吧！",
+            "body": (
+                "概览页面会显示今日课程和下一节课提醒，\n"
+                "周视图和月视图帮助你掌握全局安排。\n"
+                "祝你学习愉快！"
+            ),
+        },
+    ]
+
+    def __init__(self, parent: Gtk.Window):
+        super().__init__(title="新手引导", modal=True, transient_for=parent)
+        self.set_default_size(400, 380)
+        self._step = 0
+
+        content = self.get_content_area()
+        content.set_margin_top(0)
+        content.set_margin_bottom(0)
+        content.set_margin_start(0)
+        content.set_margin_end(0)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # ── Step pages ─────────────────────────────────────────
+        self._stack = Gtk.Stack()
+        self._stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self._stack.set_transition_duration(250)
+        self._stack.set_vexpand(True)
+
+        for i, step in enumerate(self._STEPS):
+            page = self._make_page(step)
+            self._stack.add_named(page, f"step{i}")
+
+        outer.append(self._stack)
+
+        # ── Dot indicators ─────────────────────────────────────
+        dots_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        dots_box.set_halign(Gtk.Align.CENTER)
+        dots_box.set_margin_top(8)
+        dots_box.set_margin_bottom(8)
+        self._dots: list[Gtk.Box] = []
+        for i in range(len(self._STEPS)):
+            dot = Gtk.Box()
+            dot.set_size_request(10, 10)
+            dot.add_css_class("dot-active" if i == 0 else "dot-inactive")
+            dot.set_margin_start(4)
+            dot.set_margin_end(4)
+            self._dots.append(dot)
+            dots_box.append(dot)
+        outer.append(dots_box)
+
+        # ── Navigation buttons ──────────────────────────────────
+        nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        nav_box.set_margin_start(16)
+        nav_box.set_margin_end(16)
+        nav_box.set_margin_bottom(16)
+
+        self._prev_btn = Gtk.Button(label="上一步")
+        self._prev_btn.add_css_class("pill")
+        self._prev_btn.set_sensitive(False)
+        self._prev_btn.connect("clicked", self._on_prev)
+
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+
+        self._next_btn = Gtk.Button(label="下一步")
+        self._next_btn.add_css_class("pill")
+        self._next_btn.add_css_class("suggested-action")
+        self._next_btn.connect("clicked", self._on_next)
+
+        nav_box.append(self._prev_btn)
+        nav_box.append(spacer)
+        nav_box.append(self._next_btn)
+        outer.append(nav_box)
+
+        content.append(outer)
+
+    def _make_page(self, step: dict) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_valign(Gtk.Align.CENTER)
+        box.add_css_class("onboarding-page")
+
+        emoji_lbl = Gtk.Label(label=step["emoji"])
+        emoji_lbl.add_css_class("onboarding-icon")
+        box.append(emoji_lbl)
+
+        title_lbl = Gtk.Label(label=step["title"])
+        title_lbl.add_css_class("onboarding-title")
+        title_lbl.set_justify(Gtk.Justification.CENTER)
+        title_lbl.set_wrap(True)
+        box.append(title_lbl)
+
+        body_lbl = Gtk.Label(label=step["body"])
+        body_lbl.add_css_class("onboarding-body")
+        body_lbl.set_justify(Gtk.Justification.CENTER)
+        body_lbl.set_wrap(True)
+        body_lbl.set_max_width_chars(40)
+        box.append(body_lbl)
+
+        return box
+
+    def _go_to(self, idx: int):
+        self._step = idx
+        self._stack.set_visible_child_name(f"step{idx}")
+        for i, dot in enumerate(self._dots):
+            dot.remove_css_class("dot-active")
+            dot.remove_css_class("dot-inactive")
+            dot.add_css_class("dot-active" if i == idx else "dot-inactive")
+        self._prev_btn.set_sensitive(idx > 0)
+        last = len(self._STEPS) - 1
+        if idx == last:
+            self._next_btn.set_label("开始使用！")
+        else:
+            self._next_btn.set_label("下一步")
+
+    def _on_prev(self, _btn):
+        if self._step > 0:
+            self._go_to(self._step - 1)
+
+    def _on_next(self, _btn):
+        if self._step < len(self._STEPS) - 1:
+            self._go_to(self._step + 1)
+        else:
+            self.response(Gtk.ResponseType.OK)
+
+
+# ──────────────────────────── Import Dialog ─────────────────────
+
+
+class ImportCoursesDialog(Gtk.Dialog):
+    """Import courses from a .ics / .json file or by pasting text."""
+
+    _HINT = (
+        "支持 iCalendar (.ics) 和 JSON 两种格式。\n"
+        "可从教务系统、超级课程表等导出 .ics 文件后导入，\n"
+        "或按 JSON 模板手动准备数据并粘贴到下方。"
+    )
+
+    def __init__(self, parent: Gtk.Window):
+        super().__init__(title="导入课程", modal=True, transient_for=parent)
+        self.set_default_size(520, 520)
+        self._imported_courses: list[Course] = []
+
+        self.add_button("取消", Gtk.ResponseType.CANCEL)
+        self._ok_btn = self.add_button("导入", Gtk.ResponseType.OK)
+        self._ok_btn.add_css_class("suggested-action")
+        self._ok_btn.set_sensitive(False)
+
+        content = self.get_content_area()
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        content.set_margin_start(14)
+        content.set_margin_end(14)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+
+        # Description
+        hint = Gtk.Label(label=self._HINT, xalign=0, wrap=True)
+        hint.add_css_class("dim-label")
+        box.append(hint)
+
+        # File chooser row
+        file_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        file_row.set_valign(Gtk.Align.CENTER)
+        file_btn = Gtk.Button(label="选择文件…")
+        file_btn.add_css_class("pill")
+        file_btn.connect("clicked", self._on_open_file)
+        self._file_label = Gtk.Label(label="未选择文件", xalign=0)
+        self._file_label.add_css_class("dim-label")
+        self._file_label.set_ellipsize(Pango.EllipsizeMode.START)
+        self._file_label.set_hexpand(True)
+        file_row.append(file_btn)
+        file_row.append(self._file_label)
+        box.append(file_row)
+
+        # Separator
+        sep_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        sep_row.set_halign(Gtk.Align.FILL)
+        left_sep = Gtk.Separator()
+        left_sep.set_hexpand(True)
+        left_sep.set_valign(Gtk.Align.CENTER)
+        right_sep = Gtk.Separator()
+        right_sep.set_hexpand(True)
+        right_sep.set_valign(Gtk.Align.CENTER)
+        or_lbl = Gtk.Label(label="或粘贴数据")
+        or_lbl.add_css_class("dim-label")
+        sep_row.append(left_sep)
+        sep_row.append(or_lbl)
+        sep_row.append(right_sep)
+        box.append(sep_row)
+
+        # Template button
+        tpl_btn = Gtk.Button(label="查看 JSON 格式示例")
+        tpl_btn.add_css_class("flat")
+        tpl_btn.connect("clicked", self._on_show_template)
+        box.append(tpl_btn)
+
+        # Text area
+        self._text_view = Gtk.TextView()
+        self._text_view.set_monospace(True)
+        self._text_view.set_wrap_mode(Gtk.WrapMode.NONE)
+        self._text_view.get_buffer().connect("changed", self._on_text_changed)
+        sw = Gtk.ScrolledWindow()
+        sw.set_vexpand(True)
+        sw.set_hexpand(True)
+        sw.set_min_content_height(160)
+        sw.set_child(self._text_view)
+        box.append(sw)
+
+        # Parse button
+        parse_btn = Gtk.Button(label="解析预览")
+        parse_btn.add_css_class("pill")
+        parse_btn.connect("clicked", self._on_parse)
+        box.append(parse_btn)
+
+        # Result / error labels
+        self._result_label = Gtk.Label(label="", xalign=0, wrap=True)
+        self._result_label.set_visible(False)
+        box.append(self._result_label)
+
+        self._error_label = Gtk.Label(label="", xalign=0, wrap=True)
+        self._error_label.add_css_class("error")
+        self._error_label.set_visible(False)
+        box.append(self._error_label)
+
+        content.append(box)
+
+    # ── file chooser ─────────────────────────────────────────────
+
+    def _on_open_file(self, _btn):
+        native = Gtk.FileChooserNative.new(
+            "选择 .ics 或 .json 文件",
+            self,
+            Gtk.FileChooserAction.OPEN,
+            "打开",
+            "取消",
+        )
+        f = Gtk.FileFilter()
+        f.set_name("课程文件 (*.ics, *.json)")
+        f.add_pattern("*.ics")
+        f.add_pattern("*.json")
+        native.add_filter(f)
+        native.connect("response", self._on_file_response)
+        native.show()
+
+    def _on_file_response(self, native, response):
+        if response == Gtk.ResponseType.ACCEPT:
+            gfile = native.get_file()
+            if gfile:
+                path = gfile.get_path()
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
+                except Exception as exc:
+                    self._show_error(f"读取文件失败：{exc}")
+                    return
+                self._file_label.set_text(path)
+                self._text_view.get_buffer().set_text(text)
+                self._on_parse(None)
+
+    # ── text / template ──────────────────────────────────────────
+
+    def _on_text_changed(self, _buf):
+        self._ok_btn.set_sensitive(False)
+        self._result_label.set_visible(False)
+        self._error_label.set_visible(False)
+
+    def _on_show_template(self, _btn):
+        from importer import JSON_TEMPLATE
+        self._text_view.get_buffer().set_text(JSON_TEMPLATE)
+
+    # ── parse ────────────────────────────────────────────────────
+
+    def _on_parse(self, _btn):
+        from importer import parse_ics, parse_json_courses
+
+        buf = self._text_view.get_buffer()
+        text = buf.get_text(
+            buf.get_start_iter(), buf.get_end_iter(), False
+        ).strip()
+
+        if not text:
+            self._show_error("请先输入课程数据或选择文件")
+            return
+
+        text_upper = text.upper()
+        if "BEGIN:VCALENDAR" in text_upper or "BEGIN:VEVENT" in text_upper:
+            courses, warnings = parse_ics(text)
+        else:
+            courses, warnings = parse_json_courses(text)
+
+        if not courses:
+            self._show_error("未能解析出任何课程，请检查格式是否正确")
+            return
+
+        self._imported_courses = courses
+        msg = f"✅ 解析成功：{len(courses)} 门课程"
+        if warnings:
+            shown = "；".join(warnings[:3])
+            extra = f"（共 {len(warnings)} 条警告）" if len(warnings) > 3 else ""
+            msg += f"\n⚠️ {shown}{extra}"
+
+        self._result_label.set_text(msg)
+        self._result_label.set_visible(True)
+        self._error_label.set_visible(False)
+        self._ok_btn.set_sensitive(True)
+
+    def _show_error(self, msg: str):
+        self._error_label.set_text(msg)
+        self._error_label.set_visible(True)
+        self._result_label.set_visible(False)
+        self._ok_btn.set_sensitive(False)
+
+    # ── public ───────────────────────────────────────────────────
+
+    def get_imported_courses(self) -> list[Course]:
+        return list(self._imported_courses)
+
+
 # ──────────────────────────── Week Grid View ────────────────────
 
 
@@ -1161,6 +1648,11 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         add_btn.connect("clicked", self._on_add_clicked)
         header.pack_end(add_btn)
 
+        import_btn = Gtk.Button(icon_name="document-save-symbolic")
+        import_btn.set_tooltip_text("导入课程（.ics / JSON）")
+        import_btn.connect("clicked", self._on_import_clicked)
+        header.pack_end(import_btn)
+
         add_schedule_btn = Gtk.Button(icon_name="folder-new-symbolic")
         add_schedule_btn.set_tooltip_text("新建课表")
         add_schedule_btn.connect("clicked", self._on_add_schedule_clicked)
@@ -1187,6 +1679,35 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
 
         p_overview = self._view_stack.add_titled(overview_scroll, "overview", "概览")
         p_overview.set_icon_name("view-list-symbolic")
+
+        # ── Mascot card (top of overview) ────────────────────────
+        self._mascot_card = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=14
+        )
+        self._mascot_card.add_css_class("mascot-card")
+
+        # Emoji circle
+        emoji_bg = Gtk.Box()
+        emoji_bg.set_halign(Gtk.Align.CENTER)
+        emoji_bg.set_valign(Gtk.Align.CENTER)
+        emoji_bg.add_css_class("mascot-emoji-bg")
+        self._mascot_emoji_lbl = Gtk.Label(label="🌟")
+        self._mascot_emoji_lbl.add_css_class("mascot-emoji")
+        emoji_bg.append(self._mascot_emoji_lbl)
+        self._mascot_card.append(emoji_bg)
+
+        # Text side
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        text_box.set_valign(Gtk.Align.CENTER)
+        text_box.set_hexpand(True)
+        self._mascot_msg_lbl = Gtk.Label(
+            label="", xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR
+        )
+        self._mascot_msg_lbl.add_css_class("mascot-title")
+        text_box.append(self._mascot_msg_lbl)
+        self._mascot_card.append(text_box)
+
+        self._overview_box.append(self._mascot_card)
 
         # Overview inner widgets
         term_group = Adw.PreferencesGroup(title="学期信息")
@@ -1237,6 +1758,10 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         self.set_content(toolbar_view)
 
         self.refresh_ui()
+
+        # ── Show onboarding on first launch ──────────────────────
+        if not self._settings.get("onboarding_done", False):
+            GLib.idle_add(self._show_onboarding)
 
 
 
@@ -1336,6 +1861,16 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
 
         # Update delete-schedule button sensitivity (can't delete last schedule)
         self._del_schedule_btn.set_sensitive(len(self._schedules) > 1)
+
+        # ── Mascot card ─────────────────────────────────────────
+        emoji, msg, extra_cls = _get_mascot_info(self._courses, current_week)
+        self._mascot_emoji_lbl.set_text(emoji)
+        self._mascot_msg_lbl.set_text(msg)
+        for cls in ("mascot-card-urgent", "mascot-card-warn",
+                    "mascot-card-happy", "mascot-card-accent"):
+            self._mascot_card.remove_css_class(cls)
+        if extra_cls:
+            self._mascot_card.add_css_class(extra_cls)
 
         if term_start:
             if current_week is None:
@@ -1502,6 +2037,33 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
 
     def _get_class_periods(self) -> list[ClassPeriod]:
         return _periods_from_settings(self._settings)
+
+    def _on_import_clicked(self, _btn):
+        dlg = ImportCoursesDialog(self)
+
+        def on_response(d, response):
+            if response == Gtk.ResponseType.OK:
+                new_courses = d.get_imported_courses()
+                if new_courses:
+                    self._courses.extend(new_courses)
+                    self._persist_schedules()
+                    self.refresh_ui()
+            d.close()
+
+        dlg.connect("response", on_response)
+        dlg.present()
+
+    def _show_onboarding(self):
+        dlg = OnboardingDialog(self)
+
+        def on_response(d, _response):
+            self._settings["onboarding_done"] = True
+            self._persist_settings()
+            d.close()
+
+        dlg.connect("response", on_response)
+        dlg.present()
+        return False  # Remove GLib.idle_add callback
 
     def _on_add_clicked(self, _btn):
         dlg = CourseDialog(self, class_periods=self._get_class_periods())
