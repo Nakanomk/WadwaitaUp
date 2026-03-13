@@ -34,6 +34,16 @@ _APP_CSS = """
     min-width: 40px;
     min-height: 50px;
 }
+.week-period-separator {
+    background-image: repeating-linear-gradient(
+        90deg,
+        rgba(128,128,128,0.35) 0px,
+        rgba(128,128,128,0.35) 4px,
+        transparent 4px,
+        transparent 8px
+    );
+    min-height: 1px;
+}
 
 /* ── Month calendar ───────────────────────────────────────────── */
 .month-day-cell {
@@ -517,13 +527,18 @@ class CourseDialog(Gtk.Dialog):
 
     def _on_period_changed(self, combo, _param):
         idx = combo.get_selected()
+        is_start = combo is self.start_period_combo
+        picker = self.start_picker if is_start else self.end_picker
+
         if idx == 0 or idx > len(self._periods):
-            return  # "自定义" selected or out of range — leave time picker as-is
+            # "自定义" selected — re-enable manual editing
+            picker.set_sensitive(True)
+            return
+
+        # Non-custom period selected — fill time and lock the picker
         period = self._periods[idx - 1]
-        if combo is self.start_period_combo:
-            self.start_picker.set_time(period.start)
-        else:
-            self.end_picker.set_time(period.end)
+        picker.set_time(period.start if is_start else period.end)
+        picker.set_sensitive(False)
 
     # ── public ──────────────────────────────────────────────────
 
@@ -1210,12 +1225,12 @@ class ImportCoursesDialog(Gtk.Dialog):
 class WeekGridView(Gtk.ScrolledWindow):
     """
     Full-week timetable grid.
-    Columns = Mon–Fri (5 days), rows = class periods, courses = coloured cards.
+    Columns = Mon–Sun (7 days), rows = class periods, courses = coloured cards.
     The grid expands to fill the available window width.
     """
 
-    # Show Mon–Fri only (5 days) so the grid fills the window
-    _NUM_DAYS = 5            # Monday through Friday
+    # Show Mon–Sun (7 days)
+    _NUM_DAYS = 7            # Monday through Sunday
     _PERIOD_LABEL_WIDTH = 40  # px – fixed width of the period-label column
     _CELL_HEIGHT = 54         # px – minimum height of every grid row
 
@@ -1314,26 +1329,36 @@ class WeekGridView(Gtk.ScrolledWindow):
 
         # ── Compute placements, tracking occupied cells ─────────
         occupied: set   = set()
-        placements: list = []          # (course, col, grid_row, span)
+        placements: list = []          # (course, col, pidx, span)
 
         for course in self._courses:
             if course.day > self._NUM_DAYS:
-                continue   # skip weekend courses in 5-day view
+                continue
             pidx, span = _get_period_span(course, self._periods)
             if pidx is None:
                 continue
-            col      = course.day
-            grid_row = pidx + 1        # +1 for header row
+            col         = course.day
+            period_row  = pidx + 1     # 1-based period row (for occupied tracking)
             # Skip if conflicting with already-placed course
-            if any((col, grid_row + k) in occupied for k in range(span)):
+            if any((col, period_row + k) in occupied for k in range(span)):
                 continue
             for k in range(span):
-                occupied.add((col, grid_row + k))
-            placements.append((course, col, grid_row, span))
+                occupied.add((col, period_row + k))
+            placements.append((course, col, pidx, span))
 
-        # ── Period labels + empty-cell placeholders ─────────────
+        # ── Period labels + dashed separator rows + empty-cell placeholders ──
+        # Row layout: row 0 = header; for each period i:
+        #   row 2*i+1 = dashed separator, row 2*i+2 = content
         for ridx, period in enumerate(self._periods):
-            grid_row = ridx + 1
+            sep_row  = ridx * 2 + 1   # dashed separator above each period
+            grid_row = ridx * 2 + 2   # content row
+
+            # Dashed separator line spanning all columns
+            sep = Gtk.Box()
+            sep.set_size_request(-1, 1)
+            sep.set_hexpand(True)
+            sep.add_css_class("week-period-separator")
+            self._grid.attach(sep, 0, sep_row, self._NUM_DAYS + 1, 1)
 
             pbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             pbox.set_halign(Gtk.Align.CENTER)
@@ -1350,18 +1375,22 @@ class WeekGridView(Gtk.ScrolledWindow):
             pbox.append(t_lbl)
             self._grid.attach(pbox, 0, grid_row, 1, 1)
 
+            period_row = ridx + 1      # 1-based period row (for occupied check)
             for col in range(1, self._NUM_DAYS + 1):
-                if (col, grid_row) not in occupied:
+                if (col, period_row) not in occupied:
                     ph = Gtk.Box()
                     ph.set_hexpand(True)
                     ph.set_size_request(-1, self._CELL_HEIGHT)
                     self._grid.attach(ph, col, grid_row, 1, 1)
 
         # ── Course cards ──────────────────────────────────────
-        for course, col, grid_row, span in placements:
+        # Each card starts at the content row of its first period and spans
+        # through intermediate separator rows: grid_row = pidx*2+2,
+        # grid_span = span*2-1 (covers separator rows between periods).
+        for course, col, pidx, span in placements:
             bg, fg = self._color_map.get(course.id, ("#888888", "#ffffff"))
             card   = self._make_card(course, bg, fg, span)
-            self._grid.attach(card, col, grid_row, 1, span)
+            self._grid.attach(card, col, pidx * 2 + 2, 1, span * 2 - 1)
 
     def _make_card(self, course: Course, bg: str, fg: str, span: int) -> Gtk.Widget:
         cls = _course_css_class(course.id)
@@ -1693,6 +1722,8 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         emoji_bg.add_css_class("mascot-emoji-bg")
         self._mascot_emoji_lbl = Gtk.Label(label="🌟")
         self._mascot_emoji_lbl.add_css_class("mascot-emoji")
+        self._mascot_emoji_lbl.set_hexpand(True)
+        self._mascot_emoji_lbl.set_vexpand(True)
         emoji_bg.append(self._mascot_emoji_lbl)
         self._mascot_card.append(emoji_bg)
 
