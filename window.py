@@ -26,14 +26,13 @@ _APP_CSS = """
 .course-card {
     border-radius: 8px;
     padding: 4px 6px;
-    min-width: 56px;
     min-height: 50px;
-    margin: 1px;
+    margin: 2px;
 }
 
 /* ── Week grid ────────────────────────────────────────────────── */
 .week-period-label {
-    min-width: 44px;
+    min-width: 40px;
     min-height: 50px;
 }
 
@@ -438,8 +437,10 @@ class GlobalSettingsDialog(Gtk.Dialog):
 
         # Class periods ────────────────────────────────────────────
         periods_group = Adw.PreferencesGroup(title="节次时间")
-        edit_periods_btn = Gtk.Button(label="编辑节次时间…")
-        edit_periods_btn.add_css_class("pill")
+        edit_periods_btn = Gtk.Button(icon_name="document-edit-symbolic")
+        edit_periods_btn.set_tooltip_text("编辑节次时间…")
+        edit_periods_btn.add_css_class("flat")
+        edit_periods_btn.set_valign(Gtk.Align.CENTER)
         edit_periods_btn.connect("clicked", self._on_edit_periods)
         periods_row = Adw.ActionRow(title="自定义上课节次时间段")
         periods_row.add_suffix(edit_periods_btn)
@@ -483,28 +484,39 @@ class GlobalSettingsDialog(Gtk.Dialog):
 class WeekGridView(Gtk.ScrolledWindow):
     """
     Full-week timetable grid.
-    Columns = Mon–Sun, rows = class periods, courses = coloured cards.
+    Columns = Mon–Fri (5 days), rows = class periods, courses = coloured cards.
+    The grid expands to fill the available window width.
     """
+
+    # Show Mon–Fri only (5 days) so the grid fills the window
+    _NUM_DAYS = 5            # Monday through Friday
+    _PERIOD_LABEL_WIDTH = 40  # px – fixed width of the period-label column
+    _CELL_HEIGHT = 54         # px – minimum height of every grid row
 
     def __init__(self):
         super().__init__()
         self.set_hexpand(True)
         self.set_vexpand(True)
-        self.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        # No horizontal scrollbar – the grid always fills available width
+        self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
         self._courses: list = []
         self._periods: list = []
         self._color_map: dict = {}
 
         wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        wrapper.set_margin_top(8)
-        wrapper.set_margin_bottom(8)
-        wrapper.set_margin_start(8)
-        wrapper.set_margin_end(8)
+        wrapper.set_margin_top(12)
+        wrapper.set_margin_bottom(12)
+        wrapper.set_margin_start(20)
+        wrapper.set_margin_end(20)
 
         self._grid = Gtk.Grid()
-        self._grid.set_row_spacing(2)
-        self._grid.set_column_spacing(2)
+        self._grid.set_row_spacing(3)
+        self._grid.set_column_spacing(4)
+        # All columns (including the period-label column) share equal width so
+        # the day columns always stretch to fill the window.
+        self._grid.set_column_homogeneous(True)
+        self._grid.set_hexpand(True)
         wrapper.append(self._grid)
         self.set_child(wrapper)
 
@@ -541,7 +553,7 @@ class WeekGridView(Gtk.ScrolledWindow):
         corner.set_margin_bottom(8)
         self._grid.attach(corner, 0, 0, 1, 1)
 
-        for col in range(1, 8):
+        for col in range(1, self._NUM_DAYS + 1):
             wd = col
             d  = week_dates[wd - 1]
             is_today = (wd == today_wd)
@@ -571,7 +583,7 @@ class WeekGridView(Gtk.ScrolledWindow):
             lbl = Gtk.Label(label="请在全局设置中配置节次时间")
             lbl.add_css_class("dim-label")
             lbl.set_margin_top(24)
-            self._grid.attach(lbl, 0, 1, 8, 1)
+            self._grid.attach(lbl, 0, 1, self._NUM_DAYS + 1, 1)
             return
 
         # ── Compute placements, tracking occupied cells ─────────
@@ -579,6 +591,8 @@ class WeekGridView(Gtk.ScrolledWindow):
         placements: list = []          # (course, col, grid_row, span)
 
         for course in self._courses:
+            if course.day > self._NUM_DAYS:
+                continue   # skip weekend courses in 5-day view
             pidx, span = _get_period_span(course, self._periods)
             if pidx is None:
                 continue
@@ -598,7 +612,7 @@ class WeekGridView(Gtk.ScrolledWindow):
             pbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             pbox.set_halign(Gtk.Align.CENTER)
             pbox.set_valign(Gtk.Align.CENTER)
-            pbox.set_size_request(44, 54)
+            pbox.set_size_request(self._PERIOD_LABEL_WIDTH, self._CELL_HEIGHT)
             pbox.add_css_class("week-period-label")
 
             n_lbl = Gtk.Label(label=str(period.period))
@@ -610,10 +624,11 @@ class WeekGridView(Gtk.ScrolledWindow):
             pbox.append(t_lbl)
             self._grid.attach(pbox, 0, grid_row, 1, 1)
 
-            for col in range(1, 8):
+            for col in range(1, self._NUM_DAYS + 1):
                 if (col, grid_row) not in occupied:
                     ph = Gtk.Box()
-                    ph.set_size_request(64, 54)
+                    ph.set_hexpand(True)
+                    ph.set_size_request(-1, self._CELL_HEIGHT)
                     self._grid.attach(ph, col, grid_row, 1, 1)
 
         # ── Course cards ──────────────────────────────────────
@@ -925,10 +940,10 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         self._overview_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=12
         )
-        self._overview_box.set_margin_top(12)
-        self._overview_box.set_margin_bottom(12)
-        self._overview_box.set_margin_start(16)
-        self._overview_box.set_margin_end(16)
+        self._overview_box.set_margin_top(16)
+        self._overview_box.set_margin_bottom(16)
+        self._overview_box.set_margin_start(24)
+        self._overview_box.set_margin_end(24)
         overview_scroll.set_child(self._overview_box)
 
         p_overview = self._view_stack.add_titled(overview_scroll, "overview", "概览")
