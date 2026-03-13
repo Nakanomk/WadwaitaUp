@@ -3,10 +3,10 @@ import calendar as _cal
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, Pango
+from gi.repository import Gtk, Adw, Gdk, Pango, GLib
 from datetime import datetime, date, timedelta
 
-from models import Course, ClassPeriod, Schedule
+from models import Course, ClassPeriod, Schedule, HUST_SUMMER_PERIODS, HUST_WINTER_PERIODS
 from storage import ScheduleStorage, SettingsStorage
 from utils import (
     WEEKDAY_CN,
@@ -14,7 +14,6 @@ from utils import (
     get_today_courses,
     get_next_course,
     humanize_delta_minutes,
-    is_valid_hhmm,
     calc_current_week,
     hhmm_to_minutes,
 )
@@ -148,6 +147,147 @@ def _periods_from_settings(settings: dict) -> list[ClassPeriod]:
     return [ClassPeriod.from_dict(p) for p in settings.get("class_periods", [])]
 
 
+# ──────────────────────── Reusable picker widgets ───────────────
+
+
+class DatePickerButton(Gtk.Box):
+    """A button that shows a calendar popover for date selection.
+
+    Usage::
+        picker = DatePickerButton()
+        picker.set_date("2024-09-01")  # or ""
+        selected = picker.get_date()   # returns "YYYY-MM-DD" or ""
+    """
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._date: str = ""
+
+        self._btn = Gtk.MenuButton()
+        self._btn.set_hexpand(True)
+        self._btn.add_css_class("flat")
+
+        self._label = Gtk.Label(label="选择日期")
+        self._label.set_hexpand(True)
+        self._label.set_xalign(0.0)
+        self._btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._btn_box.append(Gtk.Image.new_from_icon_name("x-office-calendar-symbolic"))
+        self._btn_box.append(self._label)
+        self._btn.set_child(self._btn_box)
+
+        # Calendar inside a popover
+        self._calendar = Gtk.Calendar()
+        self._calendar.set_margin_top(8)
+        self._calendar.set_margin_bottom(8)
+        self._calendar.set_margin_start(8)
+        self._calendar.set_margin_end(8)
+        self._calendar.connect("day-selected", self._on_day_selected)
+
+        popover = Gtk.Popover()
+        popover.set_child(self._calendar)
+        self._btn.set_popover(popover)
+
+        # Clear button
+        clear_btn = Gtk.Button(icon_name="edit-clear-symbolic")
+        clear_btn.set_tooltip_text("清除日期")
+        clear_btn.add_css_class("flat")
+        clear_btn.connect("clicked", self._on_clear)
+
+        self.append(self._btn)
+        self.append(clear_btn)
+
+    def _on_day_selected(self, cal: Gtk.Calendar) -> None:
+        dt = cal.get_date()
+        # GLib.DateTime uses 1-based month
+        self._date = f"{dt.get_year():04d}-{dt.get_month():02d}-{dt.get_day_of_month():02d}"
+        self._label.set_text(self._date)
+        # Close the popover after selection
+        popover = self._btn.get_popover()
+        if popover:
+            popover.popdown()
+
+    def _on_clear(self, _btn) -> None:
+        self._date = ""
+        self._label.set_text("选择日期")
+
+    def set_date(self, date_str: str) -> None:
+        """Set date from 'YYYY-MM-DD' string (or "" to clear)."""
+        self._date = date_str or ""
+        if self._date:
+            try:
+                d = datetime.strptime(self._date, "%Y-%m-%d")
+                gdt = GLib.DateTime.new_local(d.year, d.month, d.day, 0, 0, 0.0)
+                self._calendar.select_day(gdt)
+                self._label.set_text(self._date)
+            except Exception:
+                self._date = ""
+                self._label.set_text("选择日期")
+        else:
+            self._label.set_text("选择日期")
+
+    def get_date(self) -> str:
+        """Return selected date as 'YYYY-MM-DD', or '' if none."""
+        return self._date
+
+
+class TimePickerBox(Gtk.Box):
+    """Inline hour (0–23) + minute (0–59) spinner for HH:MM time input.
+
+    Usage::
+        picker = TimePickerBox()
+        picker.set_time("08:00")
+        hhmm = picker.get_time()   # "HH:MM"
+    """
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.set_valign(Gtk.Align.CENTER)
+
+        adj_h = Gtk.Adjustment(value=8, lower=0, upper=23, step_increment=1, page_increment=1)
+        self._hour_spin = Gtk.SpinButton(adjustment=adj_h, climb_rate=1, digits=0)
+        self._hour_spin.set_wrap(True)
+        self._hour_spin.set_width_chars(2)
+        self._hour_spin.set_numeric(True)
+
+        sep = Gtk.Label(label=":")
+        sep.add_css_class("dim-label")
+
+        adj_m = Gtk.Adjustment(value=0, lower=0, upper=59, step_increment=1, page_increment=5)
+        self._min_spin = Gtk.SpinButton(adjustment=adj_m, climb_rate=1, digits=0)
+        self._min_spin.set_wrap(True)
+        self._min_spin.set_width_chars(2)
+        self._min_spin.set_numeric(True)
+
+        # Format output as zero-padded 2-digit numbers
+        self._hour_spin.connect("output", self._format_spin)
+        self._min_spin.connect("output", self._format_spin)
+
+        self.append(self._hour_spin)
+        self.append(sep)
+        self.append(self._min_spin)
+
+    @staticmethod
+    def _format_spin(spin: Gtk.SpinButton) -> bool:
+        spin.set_text(f"{int(spin.get_value()):02d}")
+        return True
+
+    def set_time(self, hhmm: str) -> None:
+        """Set time from 'HH:MM' string."""
+        try:
+            h, m = hhmm.split(":")
+            self._hour_spin.set_value(int(h))
+            self._min_spin.set_value(int(m))
+        except Exception:
+            self._hour_spin.set_value(8)
+            self._min_spin.set_value(0)
+
+    def get_time(self) -> str:
+        """Return time as 'HH:MM'."""
+        h = int(self._hour_spin.get_value())
+        m = int(self._min_spin.get_value())
+        return f"{h:02d}:{m:02d}"
+
+
 # ────────────────────────── dialogs ─────────────────────────────
 
 
@@ -182,8 +322,10 @@ class CourseDialog(Gtk.Dialog):
         self.day_combo = Gtk.DropDown.new_from_strings(
             [WEEKDAY_CN[i] for i in range(1, 8)]
         )
-        self.start_entry = Gtk.Entry(placeholder_text="08:00")
-        self.end_entry = Gtk.Entry(placeholder_text="09:35")
+        # Time pickers replace free-text entries
+        self.start_picker = TimePickerBox()
+        self.end_picker = TimePickerBox()
+        self.end_picker.set_time("09:35")
 
         # Period quick-picker ──────────────────────────────────────
         period_labels = ["自定义"] + [p.label() for p in self._periods]
@@ -210,12 +352,12 @@ class CourseDialog(Gtk.Dialog):
         grid.attach(Gtk.Label(label="结束节次", xalign=0), 0, row, 1, 1)
         grid.attach(self.end_period_combo, 1, row, 1, 1)
         row += 1
-        # Manual time entries (still editable)
+        # Time pickers (spinners for H:M)
         grid.attach(Gtk.Label(label="开始时间", xalign=0), 0, row, 1, 1)
-        grid.attach(self.start_entry, 1, row, 1, 1)
+        grid.attach(self.start_picker, 1, row, 1, 1)
         row += 1
         grid.attach(Gtk.Label(label="结束时间", xalign=0), 0, row, 1, 1)
-        grid.attach(self.end_entry, 1, row, 1, 1)
+        grid.attach(self.end_picker, 1, row, 1, 1)
         row += 1
         grid.attach(Gtk.Label(label="地点", xalign=0), 0, row, 1, 1)
         grid.attach(self.location_entry, 1, row, 1, 1)
@@ -233,8 +375,8 @@ class CourseDialog(Gtk.Dialog):
         if course:
             self.name_entry.set_text(course.name)
             self.day_combo.set_selected(course.day - 1)
-            self.start_entry.set_text(course.start)
-            self.end_entry.set_text(course.end)
+            self.start_picker.set_time(course.start)
+            self.end_picker.set_time(course.end)
             self.location_entry.set_text(course.location)
             self.teacher_entry.set_text(course.teacher)
             self.weeks_entry.set_text(course.weeks)
@@ -244,30 +386,26 @@ class CourseDialog(Gtk.Dialog):
     def _on_period_changed(self, combo, _param):
         idx = combo.get_selected()
         if idx == 0 or idx > len(self._periods):
-            return  # "自定义" selected or out of range — leave time entry as-is
+            return  # "自定义" selected or out of range — leave time picker as-is
         period = self._periods[idx - 1]
         if combo is self.start_period_combo:
-            self.start_entry.set_text(period.start)
+            self.start_picker.set_time(period.start)
         else:
-            self.end_entry.set_text(period.end)
+            self.end_picker.set_time(period.end)
 
     # ── public ──────────────────────────────────────────────────
 
     def get_course_data(self) -> Course | None:
         name = self.name_entry.get_text().strip()
         day = self.day_combo.get_selected() + 1
-        start = self.start_entry.get_text().strip()
-        end = self.end_entry.get_text().strip()
+        start = self.start_picker.get_time()
+        end = self.end_picker.get_time()
         location = self.location_entry.get_text().strip()
         teacher = self.teacher_entry.get_text().strip()
         weeks = self.weeks_entry.get_text().strip() or "1-20"
 
         if not name:
             self.error_label.set_text("课程名不能为空")
-            self.error_label.set_visible(True)
-            return None
-        if not is_valid_hhmm(start) or not is_valid_hhmm(end):
-            self.error_label.set_text("时间格式必须是 HH:MM，例如 08:00")
             self.error_label.set_visible(True)
             return None
 
@@ -300,7 +438,8 @@ class ScheduleDialog(Gtk.Dialog):
         grid = Gtk.Grid(column_spacing=12, row_spacing=12)
 
         self.name_entry = Gtk.Entry(placeholder_text="例如：2024-2025 秋季学期")
-        self.start_entry = Gtk.Entry(placeholder_text="YYYY-MM-DD")
+        # Calendar date picker replaces free-text YYYY-MM-DD entry
+        self.date_picker = DatePickerButton()
         self.total_weeks = Gtk.SpinButton.new_with_range(1, 40, 1)
         self.total_weeks.set_value(20.0)
 
@@ -311,7 +450,7 @@ class ScheduleDialog(Gtk.Dialog):
         grid.attach(Gtk.Label(label="课表名称", xalign=0),   0, 0, 1, 1)
         grid.attach(self.name_entry,                          1, 0, 1, 1)
         grid.attach(Gtk.Label(label="学期开始日期", xalign=0), 0, 1, 1, 1)
-        grid.attach(self.start_entry,                         1, 1, 1, 1)
+        grid.attach(self.date_picker,                         1, 1, 1, 1)
         grid.attach(Gtk.Label(label="总周数", xalign=0),     0, 2, 1, 1)
         grid.attach(self.total_weeks,                         1, 2, 1, 1)
         grid.attach(self.error_label,                         0, 3, 2, 1)
@@ -319,40 +458,31 @@ class ScheduleDialog(Gtk.Dialog):
 
         if schedule:
             self.name_entry.set_text(schedule.name)
-            self.start_entry.set_text(schedule.term_start_date)
+            self.date_picker.set_date(schedule.term_start_date)
             self.total_weeks.set_value(float(schedule.total_weeks))
 
     def get_data(self) -> dict | None:
-        from datetime import datetime
         name = self.name_entry.get_text().strip()
-        start = self.start_entry.get_text().strip()
+        start = self.date_picker.get_date()
         total = int(self.total_weeks.get_value())
 
         if not name:
             self.error_label.set_text("课表名称不能为空")
             self.error_label.set_visible(True)
             return None
-        if start:
-            try:
-                datetime.strptime(start, "%Y-%m-%d")
-            except Exception:
-                self.error_label.set_text("日期格式错误，请用 YYYY-MM-DD")
-                self.error_label.set_visible(True)
-                return None
         return {"name": name, "term_start_date": start, "total_weeks": total}
 
 
 class ClassPeriodsDialog(Gtk.Dialog):
-    """Edit the list of class-period time slots (global setting)."""
+    """Edit the list of class-period time slots (global setting).
 
-    _HELP = (
-        "每行一个节次，格式：HH:MM-HH:MM\n"
-        "节次编号按行顺序自动分配。"
-    )
+    Each period is shown as a row with interactive time spinners.
+    Preset buttons for HUST 夏令时 and 冬令时 are provided.
+    """
 
     def __init__(self, parent: Gtk.Window, class_periods: list[ClassPeriod]):
         super().__init__(title="节次时间设置", modal=True, transient_for=parent)
-        self.set_default_size(320, 420)
+        self.set_default_size(420, 520)
 
         self.add_button("取消", Gtk.ResponseType.CANCEL)
         self.add_button("保存", Gtk.ResponseType.OK)
@@ -363,44 +493,153 @@ class ClassPeriodsDialog(Gtk.Dialog):
         content.set_margin_start(12)
         content.set_margin_end(12)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
-        help_lbl = Gtk.Label(label=self._HELP, xalign=0, wrap=True)
-        help_lbl.add_css_class("dim-label")
-        box.append(help_lbl)
+        # ── Preset buttons (HUST 夏令时 / 冬令时) ──────────────────
+        preset_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        preset_lbl = Gtk.Label(label="预设：")
+        preset_lbl.add_css_class("dim-label")
+        preset_box.append(preset_lbl)
 
-        self.text_view = Gtk.TextView()
-        self.text_view.set_monospace(True)
-        self.text_view.set_wrap_mode(Gtk.WrapMode.NONE)
-        lines = "\n".join(f"{p.start}-{p.end}" for p in class_periods)
-        self.text_view.get_buffer().set_text(lines)
+        summer_btn = Gtk.Button(label="华中科技大学 夏令时")
+        summer_btn.add_css_class("pill")
+        summer_btn.connect("clicked", self._on_preset_summer)
+        preset_box.append(summer_btn)
+
+        winter_btn = Gtk.Button(label="华中科技大学 冬令时")
+        winter_btn.add_css_class("pill")
+        winter_btn.connect("clicked", self._on_preset_winter)
+        preset_box.append(winter_btn)
+
+        outer.append(preset_box)
+
+        # ── Scrollable list of period rows ─────────────────────────
+        self._list_box = Gtk.ListBox()
+        self._list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._list_box.add_css_class("boxed-list")
 
         sw = Gtk.ScrolledWindow()
         sw.set_vexpand(True)
-        sw.set_child(self.text_view)
-        box.append(sw)
+        sw.set_child(self._list_box)
+        outer.append(sw)
+
+        # ── "Add period" button ────────────────────────────────────
+        add_btn = Gtk.Button(label="＋ 添加节次")
+        add_btn.add_css_class("pill")
+        add_btn.connect("clicked", self._on_add_period)
+        outer.append(add_btn)
 
         self.error_label = Gtk.Label(xalign=0, wrap=True)
         self.error_label.add_css_class("error")
         self.error_label.set_visible(False)
-        box.append(self.error_label)
+        outer.append(self.error_label)
 
-        content.append(box)
+        content.append(outer)
+
+        # Populate rows from existing periods
+        self._rows: list[tuple[TimePickerBox, TimePickerBox]] = []
+        for p in class_periods:
+            self._append_row(p.start, p.end)
+
+    # ── internal helpers ─────────────────────────────────────────
+
+    @staticmethod
+    def _period_label(n: int) -> str:
+        return f"第 {n} 节"
+
+    def _append_row(self, start: str = "08:00", end: str = "08:50") -> None:
+        idx = len(self._rows) + 1
+
+        row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row_box.set_margin_top(6)
+        row_box.set_margin_bottom(6)
+        row_box.set_margin_start(8)
+        row_box.set_margin_end(8)
+
+        num_lbl = Gtk.Label(label=self._period_label(idx))
+        num_lbl.set_width_chars(6)
+        num_lbl.set_xalign(0.0)
+        row_box.append(num_lbl)
+
+        start_picker = TimePickerBox()
+        start_picker.set_time(start)
+        row_box.append(start_picker)
+
+        sep_lbl = Gtk.Label(label="–")
+        sep_lbl.add_css_class("dim-label")
+        row_box.append(sep_lbl)
+
+        end_picker = TimePickerBox()
+        end_picker.set_time(end)
+        row_box.append(end_picker)
+
+        # Delete button
+        del_btn = Gtk.Button(icon_name="user-trash-symbolic")
+        del_btn.add_css_class("flat")
+        del_btn.add_css_class("destructive-action")
+        del_btn.set_tooltip_text("删除此节次")
+        row_pair = (start_picker, end_picker)
+        del_btn.connect("clicked", self._on_delete_row, row_pair)
+        row_box.append(del_btn)
+
+        list_row = Gtk.ListBoxRow()
+        list_row.set_child(row_box)
+        self._list_box.append(list_row)
+        self._rows.append(row_pair)
+
+    def _reload_rows(self, periods: list[dict]) -> None:
+        """Replace all rows with the given period list."""
+        # Remove all existing rows
+        child = self._list_box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._list_box.remove(child)
+            child = nxt
+        self._rows.clear()
+        for p in periods:
+            self._append_row(p["start"], p["end"])
+
+    # ── callbacks ────────────────────────────────────────────────
+
+    def _on_add_period(self, _btn) -> None:
+        self._append_row()
+
+    def _on_delete_row(self, _btn, row_pair: tuple) -> None:
+        idx = self._rows.index(row_pair)
+        self._rows.pop(idx)
+        # Remove from list box
+        lbrow = self._list_box.get_row_at_index(idx)
+        if lbrow:
+            self._list_box.remove(lbrow)
+        # Renumber remaining rows
+        self._renumber_rows()
+
+    def _renumber_rows(self) -> None:
+        child = self._list_box.get_first_child()
+        n = 1
+        while child:
+            row_box = child.get_child()
+            if row_box:
+                first_child = row_box.get_first_child()
+                if isinstance(first_child, Gtk.Label):
+                    first_child.set_text(self._period_label(n))
+            child = child.get_next_sibling()
+            n += 1
+
+    def _on_preset_summer(self, _btn) -> None:
+        self._reload_rows(HUST_SUMMER_PERIODS)
+
+    def _on_preset_winter(self, _btn) -> None:
+        self._reload_rows(HUST_WINTER_PERIODS)
+
+    # ── public ──────────────────────────────────────────────────
 
     def get_periods(self) -> list[ClassPeriod] | None:
-        buf = self.text_view.get_buffer()
-        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
         periods: list[ClassPeriod] = []
-        for idx, line in enumerate(text.splitlines(), start=1):
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("-")
-            if len(parts) != 2 or not is_valid_hhmm(parts[0]) or not is_valid_hhmm(parts[1]):
-                self.error_label.set_text(f"第 {idx} 行格式有误（应为 HH:MM-HH:MM）")
-                self.error_label.set_visible(True)
-                return None
-            periods.append(ClassPeriod(period=idx, start=parts[0], end=parts[1]))
+        for idx, (sp, ep) in enumerate(self._rows, start=1):
+            start = sp.get_time()
+            end = ep.get_time()
+            periods.append(ClassPeriod(period=idx, start=start, end=end))
         return periods
 
 
