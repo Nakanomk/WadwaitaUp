@@ -317,31 +317,37 @@ class WakeupWindow(Adw.ApplicationWindow):
 
     def on_settings_clicked(self, _btn):
         dialog = TermSettingsDialog(self, self.settings)
-        while True:
-            resp = dialog.run()
-            if resp != Gtk.ResponseType.OK:
-                break
-            data = dialog.get_settings()
-            if data is not None:
-                self.settings = data
-                self.persist_settings()
-                self.refresh_ui()
-                break
-        dialog.close()
+
+        def on_settings_response(dlg, response):
+            if response == Gtk.ResponseType.OK:
+                data = dlg.get_settings()
+                if data is not None:
+                    self.settings = data
+                    self.persist_settings()
+                    self.refresh_ui()
+                    dlg.close()
+            else:
+                dlg.close()
+
+        dialog.connect("response", on_settings_response)
+        dialog.present()
 
     def on_add_clicked(self, _btn):
         dialog = CourseDialog(self)
-        while True:
-            resp = dialog.run()
-            if resp != Gtk.ResponseType.OK:
-                break
-            data = dialog.get_course_data()
-            if data is not None:
-                self.courses.append(data)
-                self.persist_courses()
-                self.refresh_ui()
-                break
-        dialog.close()
+
+        def on_add_response(dlg, response):
+            if response == Gtk.ResponseType.OK:
+                data = dlg.get_course_data()
+                if data is not None:
+                    self.courses.append(data)
+                    self.persist_courses()
+                    self.refresh_ui()
+                    dlg.close()
+            else:
+                dlg.close()
+
+        dialog.connect("response", on_add_response)
+        dialog.present()
 
     def on_edit_clicked(self, _btn, course_id: str):
         course = next((c for c in self.courses if c.id == course_id), None)
@@ -349,18 +355,21 @@ class WakeupWindow(Adw.ApplicationWindow):
             return
 
         dialog = CourseDialog(self, course=course)
-        while True:
-            resp = dialog.run()
-            if resp != Gtk.ResponseType.OK:
-                break
-            data = dialog.get_course_data()
-            if data is not None:
-                idx = self.courses.index(course)
-                self.courses[idx] = data
-                self.persist_courses()
-                self.refresh_ui()
-                break
-        dialog.close()
+
+        def on_edit_response(dlg, response):
+            if response == Gtk.ResponseType.OK:
+                data = dlg.get_course_data()
+                if data is not None:
+                    idx = self.courses.index(course)
+                    self.courses[idx] = data
+                    self.persist_courses()
+                    self.refresh_ui()
+                    dlg.close()
+            else:
+                dlg.close()
+
+        dialog.connect("response", on_edit_response)
+        dialog.present()
 
     def on_delete_clicked(self, _btn, course_id: str):
         self.courses = [c for c in self.courses if c.id != course_id]
