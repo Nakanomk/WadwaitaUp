@@ -2440,7 +2440,6 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         today_courses = [
             c for c in get_today_courses(self._courses)
             if is_course_active_this_week(c, current_week)
-            and not is_course_ended(c, current_week)
         ]
         if today_courses:
             for c in today_courses:
@@ -2452,17 +2451,19 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
 
         self._clear_listbox(self._week_list)
         if self._courses:
+            # Show courses that have NOT fully ended; non-active-this-week
+            # courses are still shown but marked "非本周".
             visible = [
                 c for c in self._courses
-                if is_course_active_this_week(c, current_week)
-                and not is_course_ended(c, current_week)
+                if not is_course_ended(c, current_week)
             ]
             if visible:
                 for c in visible:
-                    self._week_list.append(self._make_row(c, True))
+                    is_active = is_course_active_this_week(c, current_week)
+                    self._week_list.append(self._make_row(c, is_active))
             else:
                 empty = Gtk.ListBoxRow()
-                empty.set_child(Adw.ActionRow(title="本周没有课程", subtitle="本周无安排，可切换到周视图查看其他周"))
+                empty.set_child(Adw.ActionRow(title="本学期课程已全部结束", subtitle="可切换到周视图查看历史课程"))
                 self._week_list.append(empty)
         else:
             empty = Gtk.ListBoxRow()
@@ -2526,8 +2527,6 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
                 gfile = n.get_file()
                 if gfile:
                     path = gfile.get_path()
-                    if not path.endswith(".ics"):
-                        path += ".ics"
                     try:
                         with open(path, "w", encoding="utf-8") as fh:
                             fh.write(ics_content)
