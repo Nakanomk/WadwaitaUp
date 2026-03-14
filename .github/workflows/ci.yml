@@ -144,7 +144,7 @@ jobs:
           files = [
               "main.py", "models.py", "storage.py",
               "importer.py", "utils.py", "window.py",
-              "install.sh", "README.md",
+              "install.sh", "README.md", "VERSION",
           ]
           for f in files:
               shutil.copy(f, pkg_dir / f)
