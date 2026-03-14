@@ -129,7 +129,7 @@ def parse_weeks(weeks_str: str) -> set:
         return set(range(2, _MAX_WEEKS + 1, 2))
 
     result: set = set()
-    for part in ws.replace("，", ",").split(","):
+    for part in ws.replace("，", ",").replace('\uff0c', ',').split(","):
         part = part.strip()
         if not part:
             continue
