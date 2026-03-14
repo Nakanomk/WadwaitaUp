@@ -47,8 +47,8 @@ JSON_TEMPLATE = """\
   {
     "name": "大学物理",
     "day": 3,
-    "start": "10:00",
-    "end": "11:40",
+    "start_period": 3,
+    "end_period": 4,
     "location": "西12-201",
     "teacher": "李老师",
     "weeks": "1-16"
@@ -168,12 +168,16 @@ def parse_ics(text: str) -> tuple[list[Course], list[str]]:
 
 # ── JSON parser ──────────────────────────────────────────────────
 
-def parse_json_courses(text: str) -> tuple[list[Course], list[str]]:
+def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]]:
     """
     Parse a JSON array of course dicts and return (courses, warnings).
 
-    Each item must have at minimum "name", "day", "start", "end".
+    Each item must have at minimum "name", "day", and either:
+      - "start"/"end" (HH:MM strings), or
+      - "start_period"/"end_period" (1-based period numbers, requires *periods* arg).
+
     "day" may be an integer 1-7 (Mon=1) or a Chinese/English weekday name.
+    *periods* is an optional list of ClassPeriod used to resolve period numbers.
     """
     warnings: list[str] = []
 
@@ -211,15 +215,51 @@ def parse_json_courses(text: str) -> tuple[list[Course], list[str]]:
                 warnings.append(f"第 {idx} 项 day 值 {day} 超出范围 1-7，已跳过")
                 continue
 
-        start = str(item.get('start', '08:00')).strip()
-        end = str(item.get('end', '09:40')).strip()
+        # Resolve start time — prefer period number, fall back to HH:MM
+        start_period = item.get('start_period')
+        if start_period is not None:
+            if not periods:
+                warnings.append(
+                    f"第 {idx} 项使用了 start_period，但未提供节次时间表，已跳过"
+                )
+                continue
+            sp_idx = int(start_period) - 1
+            if not (0 <= sp_idx < len(periods)):
+                warnings.append(
+                    f"第 {idx} 项 start_period {start_period} 超出范围（共 {len(periods)} 节），已跳过"
+                )
+                continue
+            start = periods[sp_idx].start
+        else:
+            start = str(item.get('start', '08:00')).strip()
+            if not is_valid_hhmm(start):
+                warnings.append(
+                    f"第 {idx} 项 start 时间格式错误：{start}（应为 HH:MM），已跳过"
+                )
+                continue
 
-        if not is_valid_hhmm(start):
-            warnings.append(f"第 {idx} 项 start 时间格式错误：{start}（应为 HH:MM），已跳过")
-            continue
-        if not is_valid_hhmm(end):
-            warnings.append(f"第 {idx} 项 end 时间格式错误：{end}（应为 HH:MM），已跳过")
-            continue
+        # Resolve end time — prefer period number, fall back to HH:MM
+        end_period = item.get('end_period')
+        if end_period is not None:
+            if not periods:
+                warnings.append(
+                    f"第 {idx} 项使用了 end_period，但未提供节次时间表，已跳过"
+                )
+                continue
+            ep_idx = int(end_period) - 1
+            if not (0 <= ep_idx < len(periods)):
+                warnings.append(
+                    f"第 {idx} 项 end_period {end_period} 超出范围（共 {len(periods)} 节），已跳过"
+                )
+                continue
+            end = periods[ep_idx].end
+        else:
+            end = str(item.get('end', '09:40')).strip()
+            if not is_valid_hhmm(end):
+                warnings.append(
+                    f"第 {idx} 项 end 时间格式错误：{end}（应为 HH:MM），已跳过"
+                )
+                continue
 
         courses.append(Course(
             id=str(uuid.uuid4()),

@@ -1,5 +1,6 @@
 from datetime import datetime, date
 
+
 WEEKDAY_CN = {
     1: "周一",
     2: "周二",
@@ -101,20 +102,40 @@ def calc_current_week(term_start_date_str: str):
         return None
 
 
+# ── Week / conflict helpers ──────────────────────────────────────
+
+_MAX_WEEKS = 30   # upper bound for odd/even week expansion
+
+
 def parse_weeks(weeks_str: str) -> set:
+    """Parse a weeks string into a set of week numbers.
+
+    Supported formats:
+      "1-16"        → weeks 1..16
+      "1,3,5"       → specific weeks
+      "1-8,10-16"   → combined ranges
+      "单" / "奇"   → odd weeks (1,3,5,…)
+      "双" / "偶"   → even weeks (2,4,6,…)
+      ""            → no restriction (returns empty set)
     """
-    Parse a week-range string like "1-16", "1,3,5-10", "1-8,10,12-16"
-    and return the set of week numbers contained.
-    Returns an empty set if the string is empty or cannot be parsed.
-    """
+    if not weeks_str or not weeks_str.strip():
+        return set()
+
+    ws = weeks_str.strip()
+
+    if ws in ("单", "奇"):
+        return set(range(1, _MAX_WEEKS + 1, 2))
+    if ws in ("双", "偶"):
+        return set(range(2, _MAX_WEEKS + 1, 2))
+
     result: set = set()
-    if not weeks_str:
-        return result
-    for part in weeks_str.replace('\uff0c', ',').split(','):
+    for part in ws.replace("，", ",").replace('\uff0c', ',').split(","):
         part = part.strip()
-        if '-' in part:
+        if not part:
+            continue
+        if "-" in part:
             try:
-                a, b = part.split('-', 1)
+                a, b = part.split("-", 1)
                 result.update(range(int(a.strip()), int(b.strip()) + 1))
             except ValueError:
                 pass
@@ -124,3 +145,57 @@ def parse_weeks(weeks_str: str) -> set:
             except ValueError:
                 pass
     return result
+
+
+def is_course_active_this_week(course, current_week) -> bool:
+    """Return True if *course* runs during *current_week* (1-based int).
+
+    If *current_week* is None or ≤ 0 the function conservatively returns True
+    (week is unknown, show all courses).
+    """
+    if current_week is None or current_week <= 0:
+        return True
+    weeks = parse_weeks(course.weeks)
+    if not weeks:
+        return True  # No restriction → always active
+    return current_week in weeks
+
+
+def detect_conflicts(courses: list) -> list:
+    """Return a list of (course_a, course_b) pairs with overlapping time on the same day."""
+    conflicts = []
+    by_day: dict = {}
+    for c in courses:
+        by_day.setdefault(c.day, []).append(c)
+
+    for day_courses in by_day.values():
+        n = len(day_courses)
+        for i in range(n):
+            ca = day_courses[i]
+            a_start = hhmm_to_minutes(ca.start)
+            a_end   = hhmm_to_minutes(ca.end)
+            for j in range(i + 1, n):
+                cb = day_courses[j]
+                b_start = hhmm_to_minutes(cb.start)
+                b_end   = hhmm_to_minutes(cb.end)
+                if a_start < b_end and b_start < a_end:
+                    conflicts.append((ca, cb))
+    return conflicts
+
+
+def get_active_periods(settings: dict, check_date=None) -> list:
+    """Return the list of ClassPeriod objects for the time scheme active on *check_date*.
+
+    Falls back to settings["class_periods"] if no time scheme matches.
+    """
+    from models import ClassPeriod, TimeScheme
+    if check_date is None:
+        check_date = date.today()
+
+    for scheme_dict in settings.get("time_schemes", []):
+        scheme = TimeScheme.from_dict(scheme_dict)
+        if scheme.periods and scheme.is_active_on(check_date):
+            return scheme.periods
+
+    # Fallback: global class_periods
+    return [ClassPeriod.from_dict(p) for p in settings.get("class_periods", [])]

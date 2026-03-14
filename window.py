@@ -6,7 +6,9 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gdk, Pango, GLib
 from datetime import datetime, date, timedelta
 
-from models import Course, ClassPeriod, Schedule, HUST_SUMMER_PERIODS, HUST_WINTER_PERIODS
+import html as _html
+
+from models import Course, ClassPeriod, Schedule, TimeScheme, HUST_SUMMER_PERIODS, HUST_WINTER_PERIODS
 from storage import ScheduleStorage, SettingsStorage
 from utils import (
     WEEKDAY_CN,
@@ -16,6 +18,9 @@ from utils import (
     humanize_delta_minutes,
     calc_current_week,
     hhmm_to_minutes,
+    is_course_active_this_week,
+    detect_conflicts,
+    get_active_periods,
     parse_weeks,
 )
 
@@ -192,8 +197,16 @@ def _course_css_class(course_id: str) -> str:
 
 # ─────────────────────── Mascot helper ──────────────────────────
 
-def _get_mascot_info(courses: list, current_week: int | None) -> tuple[str, str, str]:
-    """Return (emoji, message, extra_css_class) for the mascot card."""
+def _get_mascot_info(
+    courses: list,
+    current_week: int | None,
+    conflicts: list | None = None,
+) -> tuple[str, str, str, bool]:
+    """Return (emoji, message, extra_css_class, is_markup) for the mascot card.
+
+    When *conflicts* is non-empty the message uses Pango markup (is_markup=True).
+    All other messages are plain text (is_markup=False).
+    """
     now = datetime.now()
     hour = now.hour
 
@@ -212,11 +225,35 @@ def _get_mascot_info(courses: list, current_week: int | None) -> tuple[str, str,
     today_name = WEEKDAY_CN.get(now.weekday() + 1, "")
     context = f"{week_str}{today_name}"
 
+    # ── Conflict alert (highest priority) ───────────────────────
+    if conflicts:
+        ca, cb = conflicts[0]
+        a_start = hhmm_to_minutes(ca.start)
+        a_end   = hhmm_to_minutes(ca.end)
+        b_start = hhmm_to_minutes(cb.start)
+        b_end   = hhmm_to_minutes(cb.end)
+        overlap_start = max(a_start, b_start)
+        overlap_end   = min(a_end,   b_end)
+
+        def _format_minutes(m: int) -> str:
+            return f"{m // 60:02d}:{m % 60:02d}"
+
+        name_a = _html.escape(ca.name)
+        name_b = _html.escape(cb.name)
+        msg = (
+            f"Oops！课程撞车啦！\n"
+            f"<b>{name_a}</b> 和 <b>{name_b}</b> 在 "
+            f"{_format_minutes(overlap_start)} 到 {_format_minutes(overlap_end)} "
+            f"之间安排冲突，请谨慎处理"
+        )
+        return ("⚠️", msg, "mascot-card-warn", True)
+
     if not courses:
         return (
             "🌟",
             f"{greeting}！添加几门课程，开始规划你的学期吧。\n{context}",
             "",
+            False,
         )
 
     next_course, delta = get_next_course(courses)
@@ -228,18 +265,21 @@ def _get_mascot_info(courses: list, current_week: int | None) -> tuple[str, str,
                 "📚",
                 f"{greeting}！「{next_course.name}」现在正在上课。\n{context}",
                 "mascot-card-accent",
+                False,
             )
         if delta < 30:
             return (
                 "⏰",
                 f"{greeting}！「{next_course.name}」还有 {delta} 分钟就要开始了，快准备一下！\n{context}",
                 "mascot-card-urgent",
+                False,
             )
         if delta < 90:
             return (
                 "🎒",
                 f"{greeting}！「{next_course.name}」再过 {humanize_delta_minutes(delta)} 开始，别迟到哦。\n{context}",
                 "mascot-card-warn",
+                False,
             )
 
     if not today_courses:
@@ -247,6 +287,7 @@ def _get_mascot_info(courses: list, current_week: int | None) -> tuple[str, str,
             "☕",
             f"{greeting}！今天没有课，好好休息一下吧。\n{context}",
             "mascot-card-happy",
+            False,
         )
 
     if today_courses and next_course:
@@ -255,9 +296,10 @@ def _get_mascot_info(courses: list, current_week: int | None) -> tuple[str, str,
             f"{greeting}！今天还有 {len(today_courses)} 节课，"
             f"下一节「{next_course.name}」在 {next_course.start} 开始。\n{context}",
             "",
+            False,
         )
 
-    return ("🌟", f"{greeting}！祝你今天学习愉快！\n{context}", "mascot-card-happy")
+    return ("🌟", f"{greeting}！祝你今天学习愉快！\n{context}", "mascot-card-happy", False)
 
 
 # ─────────────────────── Period helpers ─────────────────────────
@@ -791,6 +833,242 @@ class ClassPeriodsDialog(Gtk.Dialog):
         return periods
 
 
+class TimeSchemeEditDialog(Gtk.Dialog):
+    """Add or edit a single time scheme (令时方案)."""
+
+    def __init__(self, parent: Gtk.Window, scheme: "TimeScheme | None" = None):
+        title = "新建时间方案" if scheme is None else "编辑时间方案"
+        super().__init__(title=title, modal=True, transient_for=parent)
+        self.set_default_size(420, 300)
+
+        self._periods: list[ClassPeriod] = list(scheme.periods) if scheme else []
+
+        self.add_button("取消", Gtk.ResponseType.CANCEL)
+        ok = self.add_button("保存", Gtk.ResponseType.OK)
+        ok.add_css_class("suggested-action")
+
+        content = self.get_content_area()
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        content.set_margin_start(14)
+        content.set_margin_end(14)
+
+        grid = Gtk.Grid(column_spacing=12, row_spacing=12)
+
+        # Name
+        self._name_entry = Gtk.Entry(placeholder_text="例如：夏令时")
+        if scheme:
+            self._name_entry.set_text(scheme.name)
+        grid.attach(Gtk.Label(label="方案名称", xalign=0), 0, 0, 1, 1)
+        grid.attach(self._name_entry, 1, 0, 1, 1)
+
+        # date_from
+        self._from_entry = Gtk.Entry(placeholder_text="MM-DD，留空则无限制")
+        if scheme:
+            self._from_entry.set_text(scheme.date_from)
+        grid.attach(Gtk.Label(label="生效开始（MM-DD）", xalign=0), 0, 1, 1, 1)
+        grid.attach(self._from_entry, 1, 1, 1, 1)
+
+        # date_to
+        self._to_entry = Gtk.Entry(placeholder_text="MM-DD，留空则无限制")
+        if scheme:
+            self._to_entry.set_text(scheme.date_to)
+        grid.attach(Gtk.Label(label="生效结束（MM-DD）", xalign=0), 0, 2, 1, 1)
+        grid.attach(self._to_entry, 1, 2, 1, 1)
+
+        # Period count indicator + edit button
+        self._periods_lbl = Gtk.Label(xalign=0)
+        self._update_periods_lbl()
+        edit_periods_btn = Gtk.Button(label="设置节次时间…")
+        edit_periods_btn.add_css_class("pill")
+        edit_periods_btn.connect("clicked", self._on_edit_periods)
+        periods_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        periods_box.append(self._periods_lbl)
+        periods_box.append(edit_periods_btn)
+        grid.attach(Gtk.Label(label="节次时间表", xalign=0), 0, 3, 1, 1)
+        grid.attach(periods_box, 1, 3, 1, 1)
+
+        self._error_lbl = Gtk.Label(xalign=0, wrap=True)
+        self._error_lbl.add_css_class("error")
+        self._error_lbl.set_visible(False)
+        grid.attach(self._error_lbl, 0, 4, 2, 1)
+
+        content.append(grid)
+
+    def _update_periods_lbl(self) -> None:
+        n = len(self._periods)
+        self._periods_lbl.set_text(f"已配置 {n} 节" if n else "（未配置，使用全局设置）")
+
+    def _on_edit_periods(self, _btn) -> None:
+        dlg = ClassPeriodsDialog(self, self._periods)
+
+        def on_response(d, response):
+            if response == Gtk.ResponseType.OK:
+                result = d.get_periods()
+                if result is not None:
+                    self._periods = result
+                    self._update_periods_lbl()
+            d.close()
+
+        dlg.connect("response", on_response)
+        dlg.present()
+
+    def get_scheme(self) -> "TimeScheme | None":
+        name = self._name_entry.get_text().strip()
+        if not name:
+            self._error_lbl.set_text("方案名称不能为空")
+            self._error_lbl.set_visible(True)
+            return None
+        date_from = self._from_entry.get_text().strip()
+        date_to   = self._to_entry.get_text().strip()
+        return TimeScheme(
+            name=name,
+            date_from=date_from,
+            date_to=date_to,
+            periods=list(self._periods),
+        )
+
+
+class TimeSchemesDialog(Gtk.Dialog):
+    """Manage the list of named time schemes (令时方案).
+
+    Each scheme can have a date range (MM-DD to MM-DD) so the app
+    automatically selects the correct period table by today's date.
+    """
+
+    def __init__(self, parent: Gtk.Window, schemes: list):
+        super().__init__(title="管理时间方案（令时）", modal=True,
+                         transient_for=parent)
+        self.set_default_size(480, 420)
+
+        self._schemes: list[TimeScheme] = list(schemes)
+
+        self.add_button("关闭", Gtk.ResponseType.CLOSE)
+
+        content = self.get_content_area()
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        content.set_margin_start(14)
+        content.set_margin_end(14)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+
+        hint = Gtk.Label(
+            label=(
+                "可添加多个时间方案（如夏令时、冬令时），系统会根据今天日期自动选择当前方案。\n"
+                "若均未配置日期范围，则使用第一个有节次的方案；否则回退到全局节次设置。"
+            ),
+            xalign=0, wrap=True,
+        )
+        hint.add_css_class("dim-label")
+        outer.append(hint)
+
+        self._list_box = Gtk.ListBox()
+        self._list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._list_box.add_css_class("boxed-list")
+        sw = Gtk.ScrolledWindow()
+        sw.set_vexpand(True)
+        sw.set_child(self._list_box)
+        outer.append(sw)
+
+        add_btn = Gtk.Button(label="＋ 添加方案")
+        add_btn.add_css_class("pill")
+        add_btn.connect("clicked", self._on_add)
+        outer.append(add_btn)
+
+        content.append(outer)
+        self._rebuild_list()
+
+    # ── internals ─────────────────────────────────────────────
+
+    def _rebuild_list(self) -> None:
+        child = self._list_box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._list_box.remove(child)
+            child = nxt
+
+        for i, scheme in enumerate(self._schemes):
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row_box.set_margin_top(6)
+            row_box.set_margin_bottom(6)
+            row_box.set_margin_start(8)
+            row_box.set_margin_end(8)
+
+            name_lbl = Gtk.Label(label=scheme.name)
+            name_lbl.set_hexpand(True)
+            name_lbl.set_xalign(0.0)
+
+            date_parts = []
+            if scheme.date_from and scheme.date_to:
+                date_parts.append(f"{scheme.date_from} → {scheme.date_to}")
+            elif scheme.date_from or scheme.date_to:
+                date_parts.append(scheme.date_from or scheme.date_to)
+            date_parts.append(f"{len(scheme.periods)} 节")
+            sub_lbl = Gtk.Label(label=" · ".join(date_parts))
+            sub_lbl.add_css_class("caption")
+            sub_lbl.add_css_class("dim-label")
+            sub_lbl.set_xalign(0.0)
+
+            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            info_box.set_hexpand(True)
+            info_box.append(name_lbl)
+            info_box.append(sub_lbl)
+            row_box.append(info_box)
+
+            edit_btn = Gtk.Button(icon_name="document-edit-symbolic")
+            edit_btn.add_css_class("flat")
+            edit_btn.set_tooltip_text("编辑")
+            edit_btn.connect("clicked", self._on_edit, i)
+            row_box.append(edit_btn)
+
+            del_btn = Gtk.Button(icon_name="user-trash-symbolic")
+            del_btn.add_css_class("flat")
+            del_btn.add_css_class("destructive-action")
+            del_btn.set_tooltip_text("删除")
+            del_btn.connect("clicked", self._on_delete, i)
+            row_box.append(del_btn)
+
+            lbrow = Gtk.ListBoxRow()
+            lbrow.set_child(row_box)
+            self._list_box.append(lbrow)
+
+    def _on_add(self, _btn) -> None:
+        dlg = TimeSchemeEditDialog(self)
+
+        def on_response(d, response):
+            if response == Gtk.ResponseType.OK:
+                scheme = d.get_scheme()
+                if scheme:
+                    self._schemes.append(scheme)
+                    self._rebuild_list()
+            d.close()
+
+        dlg.connect("response", on_response)
+        dlg.present()
+
+    def _on_edit(self, _btn, idx: int) -> None:
+        dlg = TimeSchemeEditDialog(self, self._schemes[idx])
+
+        def on_response(d, response):
+            if response == Gtk.ResponseType.OK:
+                scheme = d.get_scheme()
+                if scheme:
+                    self._schemes[idx] = scheme
+                    self._rebuild_list()
+            d.close()
+
+        dlg.connect("response", on_response)
+        dlg.present()
+
+    def _on_delete(self, _btn, idx: int) -> None:
+        del self._schemes[idx]
+        self._rebuild_list()
+
+    def get_schemes(self) -> list[TimeScheme]:
+        return list(self._schemes)
+
+
 class GlobalSettingsDialog(Gtk.Dialog):
     """Global settings: color scheme + class periods."""
 
@@ -835,7 +1113,36 @@ class GlobalSettingsDialog(Gtk.Dialog):
         periods_group.add(periods_row)
         box.append(periods_group)
 
+        # Time schemes ─────────────────────────────────────────────
+        schemes_group = Adw.PreferencesGroup(title="时间方案（令时）")
+        active_name = self._active_scheme_name()
+        manage_btn = Gtk.Button(icon_name="document-edit-symbolic")
+        manage_btn.set_tooltip_text("管理时间方案…")
+        manage_btn.add_css_class("flat")
+        manage_btn.set_valign(Gtk.Align.CENTER)
+        manage_btn.connect("clicked", self._on_manage_schemes)
+        schemes_row = Adw.ActionRow(
+            title="管理时间方案",
+            subtitle=f"当前生效：{active_name}",
+        )
+        schemes_row.add_suffix(manage_btn)
+        schemes_group.add(schemes_row)
+        box.append(schemes_group)
+
         content.append(box)
+
+    def _active_scheme_name(self) -> str:
+        from utils import get_active_periods
+        schemes_raw = self._settings.get("time_schemes", [])
+        if not schemes_raw:
+            return "全局节次设置"
+        from datetime import date as _date
+        today = _date.today()
+        for s in schemes_raw:
+            scheme = TimeScheme.from_dict(s)
+            if scheme.periods and scheme.is_active_on(today):
+                return scheme.name
+        return "全局节次设置"
 
     def _on_dark_toggled(self, switch, _param):
         style_manager = Adw.StyleManager.get_default()
@@ -861,6 +1168,19 @@ class GlobalSettingsDialog(Gtk.Dialog):
                     d.close()
             else:
                 d.close()
+
+        dlg.connect("response", on_response)
+        dlg.present()
+
+    def _on_manage_schemes(self, _btn):
+        schemes = [TimeScheme.from_dict(s) for s in self._settings.get("time_schemes", [])]
+        dlg = TimeSchemesDialog(self, schemes)
+
+        def on_response(d, _response):
+            new_schemes = d.get_schemes()
+            self._settings["time_schemes"] = [s.to_dict() for s in new_schemes]
+            self._parent.on_time_schemes_changed(self._settings["time_schemes"])
+            d.close()
 
         dlg.connect("response", on_response)
         dlg.present()
@@ -1035,14 +1355,16 @@ class ImportCoursesDialog(Gtk.Dialog):
 
     _HINT = (
         "支持 iCalendar (.ics) 和 JSON 两种格式。\n"
-        "可从教务系统、超级课程表等导出 .ics 文件后导入，\n"
-        "或按 JSON 模板手动准备数据并粘贴到下方。"
+        "JSON 中可用 start/end（HH:MM）或 start_period/end_period（节次编号）指定时间。\n"
+        "weeks 格式：\"1-16\"、\"1,3,5\"、\"单\"（奇周）、\"双\"（偶周）等。"
     )
 
-    def __init__(self, parent: Gtk.Window):
+    def __init__(self, parent: Gtk.Window,
+                 class_periods: list | None = None):
         super().__init__(title="导入课程", modal=True, transient_for=parent)
         self.set_default_size(520, 520)
         self._imported_courses: list[Course] = []
+        self._class_periods: list = class_periods or []
 
         self.add_button("取消", Gtk.ResponseType.CANCEL)
         self._ok_btn = self.add_button("导入", Gtk.ResponseType.OK)
@@ -1190,7 +1512,7 @@ class ImportCoursesDialog(Gtk.Dialog):
         if "BEGIN:VCALENDAR" in text_upper or "BEGIN:VEVENT" in text_upper:
             courses, warnings = parse_ics(text)
         else:
-            courses, warnings = parse_json_courses(text)
+            courses, warnings = parse_json_courses(text, periods=self._class_periods)
 
         if not courses:
             self._show_error("未能解析出任何课程，请检查格式是否正确")
@@ -1314,6 +1636,10 @@ class WeekGridView(Gtk.Box):
             self._grid.remove(child)
             child = nxt
 
+    @staticmethod
+    def _ranges_overlap(p1: int, s1: int, p2: int, s2: int) -> bool:
+        return p1 < p2 + s2 and p2 < p1 + s1
+
     def _displayed_week_num(self) -> int | None:
         """Return the week number (1-indexed) for the displayed week, or None."""
         if not self._term_start_date:
@@ -1350,16 +1676,6 @@ class WeekGridView(Gtk.Box):
 
         # Highlight today's column only when showing the current week
         effective_today_wd = today_wd if self._week_offset == 0 else -1
-
-        # Filter courses to those active in the displayed week (when known)
-        week_num = self._displayed_week_num()
-        if week_num is not None:
-            visible_courses = [
-                c for c in self._courses
-                if not (weeks := parse_weeks(c.weeks)) or week_num in weeks
-            ]
-        else:
-            visible_courses = self._courses
 
         # ── Header row ────────────────────────────────────────
         corner = Gtk.Label(label="节次")
@@ -1402,33 +1718,74 @@ class WeekGridView(Gtk.Box):
             self._grid.attach(lbl, 0, 1, self._NUM_DAYS + 1, 1)
             return
 
-        # ── Compute placements, tracking occupied cells ─────────
-        occupied: set   = set()
-        placements: list = []          # (course, col, pidx, span)
+        # ── Step 1: compute (col, pidx, span, is_active) per course ─
+        from collections import defaultdict
 
-        for course in visible_courses:
+        displayed_week = self._displayed_week_num()
+        all_items = []   # (course, col, pidx, span, is_active)
+        for course in self._courses:
             if course.day > self._NUM_DAYS:
                 continue
             pidx, span = _get_period_span(course, self._periods)
             if pidx is None:
                 continue
-            col         = course.day
-            period_row  = pidx + 1     # 1-based period row (for occupied tracking)
-            # Skip if conflicting with already-placed course
-            if any((col, period_row + k) in occupied for k in range(span)):
-                continue
-            for k in range(span):
-                occupied.add((col, period_row + k))
-            placements.append((course, col, pidx, span))
+            is_active = is_course_active_this_week(course, displayed_week)
+            all_items.append((course, course.day, pidx, span, is_active))
 
-        # ── Period labels + dashed separator rows + empty-cell placeholders ──
-        # Row layout: row 0 = header; for each period i:
-        #   row 2*i+1 = dashed separator, row 2*i+2 = content
+        # ── Step 2: group overlapping courses per column ─────────
+        # Each group: (col, min_pidx, group_span, active_list, inactive_list)
+        # where active_list = [(course, pidx, span), ...]
+        by_col: dict = defaultdict(list)
+        for item in all_items:
+            by_col[item[1]].append(item)
+
+        grid_placements = []  # (col, min_pidx, group_span, active, inactive)
+
+        for col, items in by_col.items():
+            n = len(items)
+            parent = list(range(n))
+
+            def _find(x: int) -> int:
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def _union(x: int, y: int) -> None:
+                px, py = _find(x), _find(y)
+                if px != py:
+                    parent[px] = py
+
+            for i in range(n):
+                _, _, pidx_i, span_i, _ = items[i]
+                for j in range(i + 1, n):
+                    _, _, pidx_j, span_j, _ = items[j]
+                    if self._ranges_overlap(pidx_i, span_i, pidx_j, span_j):
+                        _union(i, j)
+
+            groups: dict = defaultdict(list)
+            for i in range(n):
+                groups[_find(i)].append(items[i])
+
+            for group_items in groups.values():
+                min_pidx  = min(it[2] for it in group_items)
+                max_end   = max(it[2] + it[3] for it in group_items)
+                group_span = max_end - min_pidx
+                active   = [(it[0], it[2], it[3]) for it in group_items if it[4]]
+                inactive = [(it[0], it[2], it[3]) for it in group_items if not it[4]]
+                grid_placements.append((col, min_pidx, group_span, active, inactive))
+
+        # ── Step 3: build occupied set for placeholder cells ─────
+        occupied: set = set()
+        for col, min_pidx, group_span, active, inactive in grid_placements:
+            for k in range(group_span):
+                occupied.add((col, min_pidx + 1 + k))
+
+        # ── Step 4: period labels + separators + empty placeholders ──
         for ridx, period in enumerate(self._periods):
-            sep_row  = ridx * 2 + 1   # dashed separator above each period
-            grid_row = ridx * 2 + 2   # content row
+            sep_row  = ridx * 2 + 1
+            grid_row = ridx * 2 + 2
 
-            # Dashed separator line spanning all columns
             sep = Gtk.Box()
             sep.set_size_request(-1, 1)
             sep.set_hexpand(True)
@@ -1450,7 +1807,7 @@ class WeekGridView(Gtk.Box):
             pbox.append(t_lbl)
             self._grid.attach(pbox, 0, grid_row, 1, 1)
 
-            period_row = ridx + 1      # 1-based period row (for occupied check)
+            period_row = ridx + 1
             for col in range(1, self._NUM_DAYS + 1):
                 if (col, period_row) not in occupied:
                     ph = Gtk.Box()
@@ -1458,14 +1815,34 @@ class WeekGridView(Gtk.Box):
                     ph.set_size_request(-1, self._CELL_HEIGHT)
                     self._grid.attach(ph, col, grid_row, 1, 1)
 
-        # ── Course cards ──────────────────────────────────────
-        # Each card starts at the content row of its first period and spans
-        # through intermediate separator rows: grid_row = pidx*2+2,
-        # grid_span = span*2-1 (covers separator rows between periods).
-        for course, col, pidx, span in placements:
-            bg, fg = self._color_map.get(course.id, ("#888888", "#ffffff"))
-            card   = self._make_card(course, bg, fg, span)
-            self._grid.attach(card, col, pidx * 2 + 2, 1, span * 2 - 1)
+        # ── Step 5: course cards ────────────────────────────────
+        for col, min_pidx, group_span, active, inactive in grid_placements:
+            grid_row  = min_pidx * 2 + 2
+            grid_span = group_span * 2 - 1
+
+            if active:
+                if len(active) == 1:
+                    course, pidx, span = active[0]
+                    bg, fg = self._color_map.get(course.id, ("#888888", "#ffffff"))
+                    card = self._make_card(course, bg, fg, span)
+                    self._grid.attach(card, col, pidx * 2 + 2, 1, span * 2 - 1)
+                else:
+                    # Conflict: show all conflicting courses side by side
+                    hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+                    hbox.set_hexpand(True)
+                    hbox.set_valign(Gtk.Align.FILL)
+                    for course, pidx, span in active:
+                        bg, fg = self._color_map.get(course.id, ("#888888", "#ffffff"))
+                        card = self._make_card(course, bg, fg, span, is_conflict=True)
+                        card.set_hexpand(True)
+                        hbox.append(card)
+                    self._grid.attach(hbox, col, grid_row, 1, grid_span)
+            elif inactive:
+                # No active course in this slot — show first inactive one dimmed
+                course, pidx, span = inactive[0]
+                bg, fg = self._color_map.get(course.id, ("#888888", "#ffffff"))
+                card = self._make_card(course, bg, fg, span, is_inactive=True)
+                self._grid.attach(card, col, pidx * 2 + 2, 1, span * 2 - 1)
 
     def _on_prev(self, _btn) -> None:
         self._week_offset -= 1
@@ -1477,7 +1854,8 @@ class WeekGridView(Gtk.Box):
         today_wd = datetime.now().weekday() + 1
         self._build(today_wd)
 
-    def _make_card(self, course: Course, bg: str, fg: str, span: int) -> Gtk.Widget:
+    def _make_card(self, course: Course, bg: str, fg: str, span: int,
+                   is_inactive: bool = False, is_conflict: bool = False) -> Gtk.Widget:
         cls = _course_css_class(course.id)
         _ensure_color_class(cls, bg, fg)
 
@@ -1488,15 +1866,22 @@ class WeekGridView(Gtk.Box):
         box.add_css_class("course-card")
         box.add_css_class(cls)
 
+        if is_inactive:
+            box.set_opacity(0.4)
+            tag_lbl = Gtk.Label(label="非本周")
+            tag_lbl.add_css_class("caption")
+            tag_lbl.set_justify(Gtk.Justification.CENTER)
+            box.append(tag_lbl)
+
         name_lbl = Gtk.Label(label=course.name)
         name_lbl.set_wrap(True)
         name_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        name_lbl.set_max_width_chars(5)
+        name_lbl.set_max_width_chars(4 if is_conflict else 5)
         name_lbl.add_css_class("caption-heading")
         name_lbl.set_justify(Gtk.Justification.CENTER)
         box.append(name_lbl)
 
-        if course.location and span >= 2:
+        if course.location and span >= 2 and not is_conflict:
             loc_lbl = Gtk.Label(label=course.location)
             loc_lbl.add_css_class("caption")
             loc_lbl.set_justify(Gtk.Justification.CENTER)
@@ -1933,6 +2318,13 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         """Called by GlobalSettingsDialog when periods are saved."""
         self._settings["class_periods"] = periods_raw
         self._persist_settings()
+        self.refresh_ui()
+
+    def on_time_schemes_changed(self, schemes_raw: list):
+        """Called by GlobalSettingsDialog when time schemes are saved."""
+        self._settings["time_schemes"] = schemes_raw
+        self._persist_settings()
+        self.refresh_ui()
 
     # ── UI refresh ───────────────────────────────────────────────
 
@@ -1943,8 +2335,10 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             listbox.remove(child)
             child = nxt
 
-    def _make_row(self, course: Course) -> Gtk.ListBoxRow:
+    def _make_row(self, course: Course, is_active: bool = True) -> Gtk.ListBoxRow:
         subtitle_parts = [f"{WEEKDAY_CN[course.day]} {course.start}–{course.end}"]
+        if not is_active:
+            subtitle_parts.append("非本周")
         if course.location:
             subtitle_parts.append(course.location)
         if course.teacher:
@@ -1952,6 +2346,8 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         subtitle_parts.append(f"第{course.weeks}周")
 
         row = Adw.ActionRow(title=course.name, subtitle=" · ".join(subtitle_parts))
+        if not is_active:
+            row.set_opacity(0.5)
 
         edit_btn = Gtk.Button(icon_name="document-edit-symbolic")
         edit_btn.add_css_class("flat")
@@ -1979,9 +2375,21 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         self._del_schedule_btn.set_sensitive(len(self._schedules) > 1)
 
         # ── Mascot card ─────────────────────────────────────────
-        emoji, msg, extra_cls = _get_mascot_info(self._courses, current_week)
+        active_for_week = [
+            c for c in self._courses
+            if is_course_active_this_week(c, current_week)
+        ]
+        conflicts = detect_conflicts(active_for_week)
+        emoji, msg, extra_cls, is_markup = _get_mascot_info(
+            self._courses, current_week, conflicts
+        )
         self._mascot_emoji_lbl.set_text(emoji)
-        self._mascot_msg_lbl.set_text(msg)
+        if is_markup:
+            self._mascot_msg_lbl.set_use_markup(True)
+            self._mascot_msg_lbl.set_markup(msg)
+        else:
+            self._mascot_msg_lbl.set_use_markup(False)
+            self._mascot_msg_lbl.set_text(msg)
         for cls in ("mascot-card-urgent", "mascot-card-warn",
                     "mascot-card-happy", "mascot-card-accent"):
             self._mascot_card.remove_css_class(cls)
@@ -2028,14 +2436,15 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         self._clear_listbox(self._week_list)
         if self._courses:
             for c in self._courses:
-                self._week_list.append(self._make_row(c))
+                is_active = is_course_active_this_week(c, current_week)
+                self._week_list.append(self._make_row(c, is_active))
         else:
             empty = Gtk.ListBoxRow()
             empty.set_child(Adw.ActionRow(title="还没有课程", subtitle="先添加几门课吧"))
             self._week_list.append(empty)
 
         # ── Refresh grid views ──────────────────────────────────
-        periods = _periods_from_settings(self._settings)
+        periods = get_active_periods(self._settings)
         self._week_grid.refresh(
             self._courses, periods,
             term_start_date=schedule.term_start_date,
@@ -2156,10 +2565,10 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
     # ── course CRUD callbacks ────────────────────────────────────
 
     def _get_class_periods(self) -> list[ClassPeriod]:
-        return _periods_from_settings(self._settings)
+        return get_active_periods(self._settings)
 
     def _on_import_clicked(self, _btn):
-        dlg = ImportCoursesDialog(self)
+        dlg = ImportCoursesDialog(self, class_periods=self._get_class_periods())
 
         def on_response(d, response):
             if response == Gtk.ResponseType.OK:
