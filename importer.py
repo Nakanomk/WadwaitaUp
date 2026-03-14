@@ -52,6 +52,16 @@ JSON_TEMPLATE = """\
     "location": "西12-201",
     "teacher": "李老师",
     "weeks": "1-16"
+  },
+  {
+    "name": "英语",
+    "location": "北1-310",
+    "teacher": "王老师",
+    "weeks": "1-16",
+    "sessions": [
+      {"day": 2, "start": "10:10", "end": "11:50"},
+      {"day": 4, "start_period": 5, "end_period": 6}
+    ]
   }
 ]"""
 
@@ -166,15 +176,115 @@ def parse_ics(text: str) -> tuple[list[Course], list[str]]:
     return courses, warnings
 
 
+# ── helpers for session time/day parsing ────────────────────────
+
+def _parse_session(session: dict, periods) -> tuple[int, str, str] | None:
+    """
+    Parse day/start/end from a session dict (or a top-level item dict).
+
+    Returns (day, start, end) on success, or None on failure.
+    The caller is responsible for appending the appropriate warning via
+    _parse_session_warning().
+    """
+    day_raw = session.get('day', 1)  # default 1 = Monday if key is absent
+    if isinstance(day_raw, str):
+        day_stripped = day_raw.strip()
+        day = _WEEKDAY_MAP.get(day_stripped) or _WEEKDAY_MAP.get(day_stripped.upper())
+        if day is None:
+            return None
+    else:
+        day = int(day_raw)
+        if not 1 <= day <= 7:
+            return None
+
+    start_period = session.get('start_period')
+    if start_period is not None:
+        if not periods:
+            return None
+        sp_idx = int(start_period) - 1
+        if not (0 <= sp_idx < len(periods)):
+            return None
+        start = periods[sp_idx].start
+    else:
+        start = str(session.get('start', '08:00')).strip()
+        if not is_valid_hhmm(start):
+            return None
+
+    end_period = session.get('end_period')
+    if end_period is not None:
+        if not periods:
+            return None
+        ep_idx = int(end_period) - 1
+        if not (0 <= ep_idx < len(periods)):
+            return None
+        end = periods[ep_idx].end
+    else:
+        end = str(session.get('end', '09:40')).strip()
+        if not is_valid_hhmm(end):
+            return None
+
+    return day, start, end
+
+
+def _parse_session_warning(session: dict, periods, label: str) -> str:
+    """Return a human-readable warning explaining why a session failed to parse."""
+    day_raw = session.get('day', 1)
+    if isinstance(day_raw, str):
+        day_stripped = day_raw.strip()
+        day = _WEEKDAY_MAP.get(day_stripped) or _WEEKDAY_MAP.get(day_stripped.upper())
+        if day is None:
+            return f"{label} day 值「{day_raw}」无法识别，已跳过"
+    else:
+        day = int(day_raw)
+        if not 1 <= day <= 7:
+            return f"{label} day 值 {day} 超出范围 1-7，已跳过"
+
+    start_period = session.get('start_period')
+    if start_period is not None:
+        if not periods:
+            return f"{label} 使用了 start_period，但未提供节次时间表，已跳过"
+        sp_idx = int(start_period) - 1
+        if not (0 <= sp_idx < len(periods)):
+            return (
+                f"{label} start_period {start_period} 超出范围"
+                f"（共 {len(periods)} 节），已跳过"
+            )
+    else:
+        start = str(session.get('start', '08:00')).strip()
+        if not is_valid_hhmm(start):
+            return f"{label} start 时间格式错误：{start}（应为 HH:MM），已跳过"
+
+    end_period = session.get('end_period')
+    if end_period is not None:
+        if not periods:
+            return f"{label} 使用了 end_period，但未提供节次时间表，已跳过"
+        ep_idx = int(end_period) - 1
+        if not (0 <= ep_idx < len(periods)):
+            return (
+                f"{label} end_period {end_period} 超出范围"
+                f"（共 {len(periods)} 节），已跳过"
+            )
+    else:
+        end = str(session.get('end', '09:40')).strip()
+        if not is_valid_hhmm(end):
+            return f"{label} end 时间格式错误：{end}（应为 HH:MM），已跳过"
+
+    return f"{label} 解析失败，已跳过"
+
+
 # ── JSON parser ──────────────────────────────────────────────────
 
 def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]]:
     """
     Parse a JSON array of course dicts and return (courses, warnings).
 
-    Each item must have at minimum "name", "day", and either:
-      - "start"/"end" (HH:MM strings), or
-      - "start_period"/"end_period" (1-based period numbers, requires *periods* arg).
+    Each item must have at minimum "name" and either:
+      a) Single-session format (legacy): "day", and either
+         - "start"/"end" (HH:MM strings), or
+         - "start_period"/"end_period" (1-based period numbers, requires *periods* arg).
+      b) Multi-session format: a "sessions" list where each session dict has
+         "day" and "start"/"end" or "start_period"/"end_period". The top-level
+         "location", "teacher", and "weeks" fields are shared across all sessions.
 
     "day" may be an integer 1-7 (Mon=1) or a Chinese/English weekday name.
     *periods* is an optional list of ClassPeriod used to resolve period numbers.
@@ -201,75 +311,62 @@ def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]
             warnings.append(f"第 {idx} 项缺少 name，已跳过")
             continue
 
-        # Parse day (int or string)
-        day_raw = item.get('day', 1)
-        if isinstance(day_raw, str):
-            day_stripped = day_raw.strip()
-            day = _WEEKDAY_MAP.get(day_stripped) or _WEEKDAY_MAP.get(day_stripped.upper())
-            if day is None:
-                warnings.append(f"第 {idx} 项 day 值「{day_raw}」无法识别，已跳过")
+        # Shared fields (used by all sessions)
+        location = str(item.get('location', '')).strip()
+        teacher = str(item.get('teacher', '')).strip()
+        weeks = str(item.get('weeks', '1-20')).strip()
+
+        # ── Multi-session format ──────────────────────────────────────
+        if 'sessions' in item:
+            sessions_raw = item['sessions']
+            if not isinstance(sessions_raw, list):
+                warnings.append(f"第 {idx} 项 sessions 应为数组，已跳过")
                 continue
-        else:
-            day = int(day_raw)
-            if not 1 <= day <= 7:
-                warnings.append(f"第 {idx} 项 day 值 {day} 超出范围 1-7，已跳过")
+            if not sessions_raw:
+                warnings.append(f"第 {idx} 项 sessions 为空，已跳过")
                 continue
 
-        # Resolve start time — prefer period number, fall back to HH:MM
-        start_period = item.get('start_period')
-        if start_period is not None:
-            if not periods:
-                warnings.append(
-                    f"第 {idx} 项使用了 start_period，但未提供节次时间表，已跳过"
-                )
-                continue
-            sp_idx = int(start_period) - 1
-            if not (0 <= sp_idx < len(periods)):
-                warnings.append(
-                    f"第 {idx} 项 start_period {start_period} 超出范围（共 {len(periods)} 节），已跳过"
-                )
-                continue
-            start = periods[sp_idx].start
-        else:
-            start = str(item.get('start', '08:00')).strip()
-            if not is_valid_hhmm(start):
-                warnings.append(
-                    f"第 {idx} 项 start 时间格式错误：{start}（应为 HH:MM），已跳过"
-                )
-                continue
+            for s_idx, session in enumerate(sessions_raw, start=1):
+                if not isinstance(session, dict):
+                    warnings.append(f"第 {idx} 项第 {s_idx} 个 session 不是对象，已跳过")
+                    continue
 
-        # Resolve end time — prefer period number, fall back to HH:MM
-        end_period = item.get('end_period')
-        if end_period is not None:
-            if not periods:
-                warnings.append(
-                    f"第 {idx} 项使用了 end_period，但未提供节次时间表，已跳过"
-                )
-                continue
-            ep_idx = int(end_period) - 1
-            if not (0 <= ep_idx < len(periods)):
-                warnings.append(
-                    f"第 {idx} 项 end_period {end_period} 超出范围（共 {len(periods)} 节），已跳过"
-                )
-                continue
-            end = periods[ep_idx].end
-        else:
-            end = str(item.get('end', '09:40')).strip()
-            if not is_valid_hhmm(end):
-                warnings.append(
-                    f"第 {idx} 项 end 时间格式错误：{end}（应为 HH:MM），已跳过"
-                )
-                continue
+                label = f"第 {idx} 项第 {s_idx} 个 session"
+                parsed = _parse_session(session, periods)
+                if parsed is None:
+                    warnings.append(_parse_session_warning(session, periods, label))
+                    continue
+                day, start, end = parsed
+                # Per-session overrides for location/teacher/weeks
+                courses.append(Course(
+                    id=str(uuid.uuid4()),
+                    name=name,
+                    day=day,
+                    start=start,
+                    end=end,
+                    location=str(session.get('location', location)).strip(),
+                    teacher=str(session.get('teacher', teacher)).strip(),
+                    weeks=str(session.get('weeks', weeks)).strip(),
+                ))
+            continue
 
+        # ── Single-session format (legacy) ────────────────────────────
+        label = f"第 {idx} 项"
+        parsed = _parse_session(item, periods)
+        if parsed is None:
+            warnings.append(_parse_session_warning(item, periods, label))
+            continue
+        day, start, end = parsed
         courses.append(Course(
             id=str(uuid.uuid4()),
             name=name,
             day=day,
             start=start,
             end=end,
-            location=str(item.get('location', '')).strip(),
-            teacher=str(item.get('teacher', '')).strip(),
-            weeks=str(item.get('weeks', '1-20')).strip(),
+            location=location,
+            teacher=teacher,
+            weeks=weeks,
         ))
 
     return courses, warnings
+

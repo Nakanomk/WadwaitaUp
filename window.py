@@ -1350,6 +1350,66 @@ class OnboardingDialog(Gtk.Dialog):
             self.response(Gtk.ResponseType.OK)
 
 
+# ──────────────────────────── Conflict Resolution Dialog ────────
+
+
+class ConflictResolutionDialog(Gtk.Dialog):
+    """
+    Shown when imported courses share names with existing ones.
+
+    The user can choose to:
+      - SKIP    : only import courses whose names are new
+      - OVERWRITE: remove existing courses with conflicting names, then import all
+    """
+
+    # Response codes (returned as response id)
+    RESP_SKIP = 1
+    RESP_OVERWRITE = 2
+
+    def __init__(self, parent: Gtk.Window,
+                 conflict_names: list[str]):
+        super().__init__(title="导入冲突", modal=True, transient_for=parent)
+        self.set_default_size(400, -1)
+
+        self.add_button("取消", Gtk.ResponseType.CANCEL)
+        self.add_button("仅导入新课程", self.RESP_SKIP)
+        overwrite_btn = self.add_button("覆盖同名课程", self.RESP_OVERWRITE)
+        overwrite_btn.add_css_class("destructive-action")
+
+        content = self.get_content_area()
+        content.set_margin_top(16)
+        content.set_margin_bottom(16)
+        content.set_margin_start(16)
+        content.set_margin_end(16)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        title_lbl = Gtk.Label(
+            label="以下课程与已有课程重名",
+            xalign=0,
+        )
+        title_lbl.add_css_class("title-4")
+        box.append(title_lbl)
+
+        names_text = "\n".join(f"• {n}" for n in conflict_names)
+        names_lbl = Gtk.Label(label=names_text, xalign=0)
+        names_lbl.set_selectable(True)
+        box.append(names_lbl)
+
+        hint_lbl = Gtk.Label(
+            label=(
+                "「仅导入新课程」：跳过重名课程，只添加无冲突的课程。\n"
+                "「覆盖同名课程」：删除已有的同名课程，再导入所有新课程。"
+            ),
+            xalign=0,
+            wrap=True,
+        )
+        hint_lbl.add_css_class("dim-label")
+        box.append(hint_lbl)
+
+        content.append(box)
+
+
 # ──────────────────────────── Import Dialog ─────────────────────
 
 
@@ -1359,6 +1419,7 @@ class ImportCoursesDialog(Gtk.Dialog):
     _HINT = (
         "支持 iCalendar (.ics) 和 JSON 两种格式。\n"
         "JSON 中可用 start/end（HH:MM）或 start_period/end_period（节次编号）指定时间。\n"
+        "一门课有多个上课时间时，可用 sessions 数组列出每节，共用 name/location/teacher/weeks。\n"
         "weeks 格式：\"1-16\"、\"1,3,5\"、\"单\"（奇周）、\"双\"（偶周）等。"
     )
 
@@ -2655,13 +2716,50 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             if response == Gtk.ResponseType.OK:
                 new_courses = d.get_imported_courses()
                 if new_courses:
-                    self._courses.extend(new_courses)
-                    self._persist_schedules()
-                    self.refresh_ui()
+                    self._apply_imported_courses(new_courses)
             d.close()
 
         dlg.connect("response", on_response)
         dlg.present()
+
+    def _apply_imported_courses(self, new_courses: list):
+        """Add new_courses to the current schedule, handling name conflicts."""
+        existing_names = {c.name for c in self._courses}
+        conflict_names = sorted({
+            c.name for c in new_courses if c.name in existing_names
+        })
+
+        if not conflict_names:
+            # No conflicts – just add everything
+            self._courses.extend(new_courses)
+            self._persist_schedules()
+            self.refresh_ui()
+            return
+
+        # Show conflict resolution dialog
+        cdlg = ConflictResolutionDialog(self, conflict_names)
+
+        def on_conflict_response(cd, resp):
+            if resp == ConflictResolutionDialog.RESP_SKIP:
+                # Only import courses whose names are new
+                to_add = [c for c in new_courses if c.name not in existing_names]
+                if to_add:
+                    self._courses.extend(to_add)
+                    self._persist_schedules()
+                    self.refresh_ui()
+            elif resp == ConflictResolutionDialog.RESP_OVERWRITE:
+                # Remove existing courses that share a name with an imported one
+                conflict_set = {c.name for c in new_courses}
+                self._courses = [c for c in self._courses
+                                 if c.name not in conflict_set]
+                self._courses.extend(new_courses)
+                self._persist_schedules()
+                self.refresh_ui()
+            # CANCEL / other: do nothing
+            cd.close()
+
+        cdlg.connect("response", on_conflict_response)
+        cdlg.present()
 
     def _show_onboarding(self):
         dlg = OnboardingDialog(self)
