@@ -99,3 +99,28 @@ def calc_current_week(term_start_date_str: str):
         return diff_days // 7 + 1
     except Exception:
         return None
+
+
+def parse_weeks(weeks_str: str) -> set:
+    """
+    Parse a week-range string like "1-16", "1,3,5-10", "1-8,10,12-16"
+    and return the set of week numbers contained.
+    Returns an empty set if the string is empty or cannot be parsed.
+    """
+    result: set = set()
+    if not weeks_str:
+        return result
+    for part in weeks_str.replace('\uff0c', ',').split(','):
+        part = part.strip()
+        if '-' in part:
+            try:
+                a, b = part.split('-', 1)
+                result.update(range(int(a.strip()), int(b.strip()) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                result.add(int(part))
+            except ValueError:
+                pass
+    return result

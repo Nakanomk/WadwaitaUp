@@ -16,6 +16,7 @@ from utils import (
     humanize_delta_minutes,
     calc_current_week,
     hhmm_to_minutes,
+    parse_weeks,
 )
 
 # ─────────────────────────── CSS ────────────────────────────────
@@ -1222,9 +1223,9 @@ class ImportCoursesDialog(Gtk.Dialog):
 # ──────────────────────────── Week Grid View ────────────────────
 
 
-class WeekGridView(Gtk.ScrolledWindow):
+class WeekGridView(Gtk.Box):
     """
-    Full-week timetable grid.
+    Full-week timetable grid with week navigation.
     Columns = Mon–Sun (7 days), rows = class periods, courses = coloured cards.
     The grid expands to fill the available window width.
     """
@@ -1235,18 +1236,48 @@ class WeekGridView(Gtk.ScrolledWindow):
     _CELL_HEIGHT = 54         # px – minimum height of every grid row
 
     def __init__(self):
-        super().__init__()
-        self.set_hexpand(True)
-        self.set_vexpand(True)
-        # No horizontal scrollbar – the grid always fills available width
-        self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         self._courses: list = []
         self._periods: list = []
         self._color_map: dict = {}
+        self._week_offset: int = 0        # 0 = current week
+        self._term_start_date: str = ""
+        self._total_weeks: int = 0
+
+        # ── Navigation bar ────────────────────────────────────
+        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        nav.set_halign(Gtk.Align.CENTER)
+        nav.set_margin_top(12)
+        nav.set_margin_bottom(4)
+
+        prev_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        prev_btn.add_css_class("flat")
+        prev_btn.connect("clicked", self._on_prev)
+
+        self._nav_label = Gtk.Label()
+        self._nav_label.add_css_class("title-3")
+        self._nav_label.set_width_chars(18)
+        self._nav_label.set_xalign(0.5)
+
+        next_btn = Gtk.Button(icon_name="go-next-symbolic")
+        next_btn.add_css_class("flat")
+        next_btn.connect("clicked", self._on_next)
+
+        nav.append(prev_btn)
+        nav.append(self._nav_label)
+        nav.append(next_btn)
+        self.append(nav)
+
+        # ── Scrollable grid area ───────────────────────────────
+        sw = Gtk.ScrolledWindow()
+        sw.set_hexpand(True)
+        sw.set_vexpand(True)
+        # No horizontal scrollbar – the grid always fills available width
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
         wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        wrapper.set_margin_top(12)
+        wrapper.set_margin_top(4)
         wrapper.set_margin_bottom(12)
         wrapper.set_margin_start(20)
         wrapper.set_margin_end(20)
@@ -1259,14 +1290,18 @@ class WeekGridView(Gtk.ScrolledWindow):
         self._grid.set_column_homogeneous(True)
         self._grid.set_hexpand(True)
         wrapper.append(self._grid)
-        self.set_child(wrapper)
+        sw.set_child(wrapper)
+        self.append(sw)
 
     # ── public ──────────────────────────────────────────────────
 
-    def refresh(self, courses: list, periods: list) -> None:
+    def refresh(self, courses: list, periods: list,
+                term_start_date: str = "", total_weeks: int = 0) -> None:
         self._courses = courses
         self._periods = periods
         self._color_map = _assign_colors(courses)
+        self._term_start_date = term_start_date
+        self._total_weeks = total_weeks
         today_wd = datetime.now().weekday() + 1  # 1=Mon … 7=Sun
         self._build(today_wd)
 
@@ -1279,12 +1314,52 @@ class WeekGridView(Gtk.ScrolledWindow):
             self._grid.remove(child)
             child = nxt
 
+    def _displayed_week_num(self) -> int | None:
+        """Return the week number (1-indexed) for the displayed week, or None."""
+        if not self._term_start_date:
+            return None
+        base_week = calc_current_week(self._term_start_date)
+        if not base_week:   # None or 0 (before term start)
+            return None
+        w = base_week + self._week_offset
+        if w < 1:
+            return None
+        if self._total_weeks and w > self._total_weeks:
+            return None
+        return w
+
+    def _update_nav_label(self, week_start: date) -> None:
+        week_end = week_start + timedelta(days=6)
+        date_str = (f"{week_start.month}/{week_start.day}"
+                    f" – {week_end.month}/{week_end.day}")
+        week_num = self._displayed_week_num()
+        if week_num is not None:
+            self._nav_label.set_text(f"第 {week_num} 周  {date_str}")
+        else:
+            self._nav_label.set_text(date_str)
+
     def _build(self, today_wd: int) -> None:
         self._clear()
 
-        today      = date.today()
-        week_start = today - timedelta(days=today.weekday())   # Monday
-        week_dates = [week_start + timedelta(days=i) for i in range(7)]
+        today       = date.today()
+        this_monday = today - timedelta(days=today.weekday())   # Monday of current week
+        week_start  = this_monday + timedelta(weeks=self._week_offset)
+        week_dates  = [week_start + timedelta(days=i) for i in range(7)]
+
+        self._update_nav_label(week_start)
+
+        # Highlight today's column only when showing the current week
+        effective_today_wd = today_wd if self._week_offset == 0 else -1
+
+        # Filter courses to those active in the displayed week (when known)
+        week_num = self._displayed_week_num()
+        if week_num is not None:
+            visible_courses = [
+                c for c in self._courses
+                if not (weeks := parse_weeks(c.weeks)) or week_num in weeks
+            ]
+        else:
+            visible_courses = self._courses
 
         # ── Header row ────────────────────────────────────────
         corner = Gtk.Label(label="节次")
@@ -1297,7 +1372,7 @@ class WeekGridView(Gtk.ScrolledWindow):
         for col in range(1, self._NUM_DAYS + 1):
             wd = col
             d  = week_dates[wd - 1]
-            is_today = (wd == today_wd)
+            is_today = (wd == effective_today_wd)
 
             vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             vbox.set_halign(Gtk.Align.CENTER)
@@ -1331,7 +1406,7 @@ class WeekGridView(Gtk.ScrolledWindow):
         occupied: set   = set()
         placements: list = []          # (course, col, pidx, span)
 
-        for course in self._courses:
+        for course in visible_courses:
             if course.day > self._NUM_DAYS:
                 continue
             pidx, span = _get_period_span(course, self._periods)
@@ -1391,6 +1466,16 @@ class WeekGridView(Gtk.ScrolledWindow):
             bg, fg = self._color_map.get(course.id, ("#888888", "#ffffff"))
             card   = self._make_card(course, bg, fg, span)
             self._grid.attach(card, col, pidx * 2 + 2, 1, span * 2 - 1)
+
+    def _on_prev(self, _btn) -> None:
+        self._week_offset -= 1
+        today_wd = datetime.now().weekday() + 1
+        self._build(today_wd)
+
+    def _on_next(self, _btn) -> None:
+        self._week_offset += 1
+        today_wd = datetime.now().weekday() + 1
+        self._build(today_wd)
 
     def _make_card(self, course: Course, bg: str, fg: str, span: int) -> Gtk.Widget:
         cls = _course_css_class(course.id)
@@ -1951,7 +2036,11 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
 
         # ── Refresh grid views ──────────────────────────────────
         periods = _periods_from_settings(self._settings)
-        self._week_grid.refresh(self._courses, periods)
+        self._week_grid.refresh(
+            self._courses, periods,
+            term_start_date=schedule.term_start_date,
+            total_weeks=schedule.total_weeks,
+        )
         color_map = _assign_colors(self._courses)
         self._month_view.refresh(self._courses, color_map)
 
