@@ -27,6 +27,9 @@ android.minapi  = 21
 android.ndk     = 25b
 android.arch    = arm64-v8a
 
+# Auto-accept SDK license prompts in CI (Buildozer uses pexpect to send "y")
+android.accept_sdk_license = True
+
 # Permissions (add more as features are developed)
 android.permissions = INTERNET
 
