@@ -166,7 +166,7 @@ jobs:
   # ── Publish GitHub Release (tag builds only, after approval) ──
   release:
     name: Release
-    needs: [build, android]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
@@ -198,92 +198,3 @@ jobs:
           files: packages/*
           generate_release_notes: true
           fail_on_unmatched_files: true
-
-  # ── Android APK build ─────────────────────────────────────────
-  android:
-    name: Build · android
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          # Buildozer currently has the best compatibility with 3.11
-          python-version: '3.11'
-
-      - name: Install Buildozer system dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            git zip unzip openjdk-17-jdk \
-            autoconf libtool pkg-config \
-            zlib1g-dev libncurses5-dev cmake \
-            libffi-dev libssl-dev
-
-      - name: Install Buildozer and Cython
-        run: pip install --upgrade buildozer cython==3.0.11
-
-      # Cache the heavy Android SDK/NDK + p4a build artefacts so that
-      # subsequent runs finish in minutes instead of 30+ minutes.
-      - name: Cache Buildozer global directory
-        uses: actions/cache@v4
-        with:
-          path: ~/.buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}-${{ runner.os }}
-          restore-keys: buildozer-
-
-      # Buildozer 1.5.0 looks for sdkmanager exclusively at
-      # <sdk>/tools/bin/sdkmanager (the old "SDK Tools" layout).
-      # Modern GitHub Actions runners only ship the new "cmdline-tools" layout
-      # where sdkmanager lives at <sdk>/cmdline-tools/latest/bin/sdkmanager.
-      #
-      # Fix: create the directory structure Buildozer expects and put a thin
-      # wrapper script at tools/bin/sdkmanager that delegates to the real
-      # sdkmanager already present on the runner.  Then pre-write the
-      # well-known license hash files so sdkmanager skips interactive prompts.
-      - name: Set up Android SDK for Buildozer
-        run: |
-          set -e
-          BUILDOZER_SDK="${HOME}/.buildozer/android/platform/android-sdk"
-
-          # Locate the real sdkmanager that ships with the GitHub Actions runner.
-          if   [ -f "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" ]; then
-            REAL_SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
-          elif [ -f "/usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager" ]; then
-            REAL_SDKMANAGER="/usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager"
-          else
-            echo "ERROR: cannot find system sdkmanager" >&2; exit 1
-          fi
-
-          # Create the wrapper at the location Buildozer 1.5.0 expects.
-          mkdir -p "${BUILDOZER_SDK}/tools/bin"
-          printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "${REAL_SDKMANAGER}" \
-            > "${BUILDOZER_SDK}/tools/bin/sdkmanager"
-          chmod +x "${BUILDOZER_SDK}/tools/bin/sdkmanager"
-
-          # Pre-write well-known license hashes so sdkmanager treats all
-          # packages (including build-tools RC releases) as already accepted.
-          mkdir -p "${BUILDOZER_SDK}/licenses"
-          # Standard Android SDK license
-          printf '%s\n' \
-            '8933bad161af4178b1185d1a37fbf41ea5269c55' \
-            'd56f5187479451eabf01fb78af6dfcb131a6481e' \
-            '24333f8a63b6825ea9c5514f83c2829b004d1fee' \
-            > "${BUILDOZER_SDK}/licenses/android-sdk-license"
-          # Preview / RC packages (build-tools 37-rc2 requires this)
-          printf '%s\n' \
-            '84831b9409646a918e30573bab4c9c91346d8abd' \
-            > "${BUILDOZER_SDK}/licenses/android-sdk-preview-license"
-
-      - name: Build Android APK (debug)
-        run: buildozer android debug
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-android
-          path: bin/*.apk
-          if-no-files-found: error
