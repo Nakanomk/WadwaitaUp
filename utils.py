@@ -199,3 +199,111 @@ def get_active_periods(settings: dict, check_date=None) -> list:
 
     # Fallback: global class_periods
     return [ClassPeriod.from_dict(p) for p in settings.get("class_periods", [])]
+
+
+def is_course_ended(course, current_week) -> bool:
+    """Return True if the course's week range has completely passed.
+
+    A course is considered ended when *current_week* is strictly greater than
+    every week number in the course's week restriction.  Returns False when
+    *current_week* is unknown (None / ≤ 0) or the course has no restriction.
+    """
+    if current_week is None or current_week <= 0:
+        return False
+    weeks = parse_weeks(course.weeks)
+    if not weeks:
+        return False   # No restriction → never ended
+    return current_week > max(weeks)
+
+
+def _ics_escape(text: str) -> str:
+    """Escape special characters for an iCalendar property value."""
+    return (text
+            .replace("\\", "\\\\")
+            .replace(";", "\\;")
+            .replace(",", "\\,")
+            .replace("\n", "\\n"))
+
+
+def export_schedule_to_ics(schedule, term_start_date_str: str) -> str:
+    """Export *schedule* to iCalendar (.ics) format.
+
+    One VEVENT is generated for every occurrence of every course (one per
+    scheduled week).  Returns an empty string if *term_start_date_str* is not
+    set or is invalid.
+    """
+    import uuid as _uuid
+    from datetime import timedelta
+
+    if not term_start_date_str:
+        return ""
+
+    try:
+        term_start = datetime.strptime(term_start_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+
+    # Monday of the week that contains term_start
+    term_monday = term_start - timedelta(days=term_start.weekday())
+
+    total_weeks = getattr(schedule, "total_weeks", 20) or 20
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//WadwaitaUp//WadwaitaUp Course Planner//ZH",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        f"X-WR-CALNAME:{_ics_escape(schedule.name)}",
+    ]
+
+    for course in schedule.courses:
+        weeks = parse_weeks(course.weeks)
+        if not weeks:
+            weeks = set(range(1, total_weeks + 1))
+
+        try:
+            start_h, start_m = map(int, course.start.split(":"))
+            end_h, end_m = map(int, course.end.split(":"))
+        except ValueError:
+            continue
+
+        for week_num in sorted(weeks):
+            if week_num < 1 or week_num > total_weeks:
+                continue
+
+            week_offset = week_num - 1   # 0-based
+            day_offset  = course.day - 1  # 0=Mon … 6=Sun
+            event_date  = term_monday + timedelta(
+                weeks=week_offset, days=day_offset
+            )
+
+            dtstart_str = (
+                f"{event_date.year:04d}{event_date.month:02d}{event_date.day:02d}"
+                f"T{start_h:02d}{start_m:02d}00"
+            )
+            dtend_str = (
+                f"{event_date.year:04d}{event_date.month:02d}{event_date.day:02d}"
+                f"T{end_h:02d}{end_m:02d}00"
+            )
+
+            summary     = _ics_escape(course.name)
+            location    = _ics_escape(course.location) if course.location else ""
+            description = _ics_escape(f"教师：{course.teacher}") if course.teacher else ""
+
+            lines += [
+                "BEGIN:VEVENT",
+                f"UID:{_uuid.uuid4()}@wadwaitaup",
+                f"DTSTART:{dtstart_str}",
+                f"DTEND:{dtend_str}",
+                f"SUMMARY:{summary}",
+            ]
+            if location:
+                lines.append(f"LOCATION:{location}")
+            if description:
+                lines.append(f"DESCRIPTION:{description}")
+            lines.append("END:VEVENT")
+
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+

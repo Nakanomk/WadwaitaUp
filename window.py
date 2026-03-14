@@ -19,9 +19,11 @@ from utils import (
     calc_current_week,
     hhmm_to_minutes,
     is_course_active_this_week,
+    is_course_ended,
     detect_conflicts,
     get_active_periods,
     parse_weeks,
+    export_schedule_to_ics,
 )
 
 # ─────────────────────────── CSS ────────────────────────────────
@@ -76,6 +78,7 @@ _APP_CSS = """
     padding: 14px 16px;
     background-color: alpha(@accent_color, 0.08);
     margin-bottom: 4px;
+    min-height: 80px;
 }
 .mascot-card-urgent {
     background-color: alpha(#e5a50a, 0.14);
@@ -2142,6 +2145,14 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         self._dark_btn.connect("toggled", self._on_dark_toggled)
         header.pack_end(self._dark_btn)
 
+        # Flag to prevent _on_dark_toggled re-entry during programmatic sync
+        self._suppress_dark_toggle = False
+
+        export_cal_btn = Gtk.Button(icon_name="x-office-calendar-symbolic")
+        export_cal_btn.set_tooltip_text("导出课程表到日历（.ics）")
+        export_cal_btn.connect("clicked", self._on_export_calendar_clicked)
+        header.pack_end(export_cal_btn)
+
         add_btn = Gtk.Button(icon_name="list-add-symbolic")
         add_btn.set_tooltip_text("添加课程")
         add_btn.connect("clicked", self._on_add_clicked)
@@ -2184,6 +2195,7 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             orientation=Gtk.Orientation.HORIZONTAL, spacing=14
         )
         self._mascot_card.add_css_class("mascot-card")
+        self._mascot_card.set_vexpand(False)
 
         # Emoji circle
         emoji_bg = Gtk.Box()
@@ -2308,11 +2320,12 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
     def on_color_scheme_changed(self, scheme: str):
         """Called by GlobalSettingsDialog when the user toggles the scheme."""
         self._settings["color_scheme"] = scheme
+        self._apply_color_scheme(scheme)
         self._persist_settings()
-        # Keep the header toggle in sync
-        self._dark_btn.handler_block_by_func(self._on_dark_toggled)
+        # Keep the header toggle in sync without re-triggering _on_dark_toggled
+        self._suppress_dark_toggle = True
         self._dark_btn.set_active(scheme == "dark")
-        self._dark_btn.handler_unblock_by_func(self._on_dark_toggled)
+        self._suppress_dark_toggle = False
 
     def on_periods_changed(self, periods_raw: list):
         """Called by GlobalSettingsDialog when periods are saved."""
@@ -2424,7 +2437,10 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             self._next_row.set_subtitle("点击右上角 + 添加课程")
 
         self._clear_listbox(self._today_list)
-        today_courses = get_today_courses(self._courses)
+        today_courses = [
+            c for c in get_today_courses(self._courses)
+            if is_course_active_this_week(c, current_week)
+        ]
         if today_courses:
             for c in today_courses:
                 self._today_list.append(self._make_row(c))
@@ -2435,9 +2451,20 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
 
         self._clear_listbox(self._week_list)
         if self._courses:
-            for c in self._courses:
-                is_active = is_course_active_this_week(c, current_week)
-                self._week_list.append(self._make_row(c, is_active))
+            # Show courses that have NOT fully ended; non-active-this-week
+            # courses are still shown but marked "非本周".
+            visible = [
+                c for c in self._courses
+                if not is_course_ended(c, current_week)
+            ]
+            if visible:
+                for c in visible:
+                    is_active = is_course_active_this_week(c, current_week)
+                    self._week_list.append(self._make_row(c, is_active))
+            else:
+                empty = Gtk.ListBoxRow()
+                empty.set_child(Adw.ActionRow(title="本学期课程已全部结束", subtitle="可切换到周视图查看历史课程"))
+                self._week_list.append(empty)
         else:
             empty = Gtk.ListBoxRow()
             empty.set_child(Adw.ActionRow(title="还没有课程", subtitle="先添加几门课吧"))
@@ -2457,10 +2484,64 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
     # ── header button callbacks ──────────────────────────────────
 
     def _on_dark_toggled(self, btn):
+        if self._suppress_dark_toggle:
+            return
         scheme = "dark" if btn.get_active() else "light"
         self._apply_color_scheme(scheme)
         self._settings["color_scheme"] = scheme
         self._persist_settings()
+
+    def _on_export_calendar_clicked(self, _btn):
+        schedule = self._active_schedule
+        if not schedule.term_start_date:
+            dlg = Adw.MessageDialog(
+                transient_for=self,
+                heading="无法导出",
+                body="请先在课表信息（铅笔图标）中设置学期开始日期，再导出日历。",
+            )
+            dlg.add_response("ok", "确定")
+            dlg.connect("response", lambda d, _r: d.close())
+            dlg.present()
+            return
+
+        ics_content = export_schedule_to_ics(schedule, schedule.term_start_date)
+        if not ics_content:
+            return
+
+        native = Gtk.FileChooserNative.new(
+            "导出课程表到日历",
+            self,
+            Gtk.FileChooserAction.SAVE,
+            "保存",
+            "取消",
+        )
+        ff = Gtk.FileFilter()
+        ff.set_name("iCalendar 文件 (*.ics)")
+        ff.add_pattern("*.ics")
+        native.add_filter(ff)
+        safe_name = schedule.name.replace("/", "-").replace("\\", "-")
+        native.set_current_name(f"{safe_name}.ics")
+
+        def on_save_response(n, response):
+            if response == Gtk.ResponseType.ACCEPT:
+                gfile = n.get_file()
+                if gfile:
+                    path = gfile.get_path()
+                    try:
+                        with open(path, "w", encoding="utf-8") as fh:
+                            fh.write(ics_content)
+                    except Exception as exc:
+                        err = Adw.MessageDialog(
+                            transient_for=self,
+                            heading="导出失败",
+                            body=str(exc),
+                        )
+                        err.add_response("ok", "确定")
+                        err.connect("response", lambda d, _r: d.close())
+                        err.present()
+
+        native.connect("response", on_save_response)
+        native.show()
 
     def _on_global_settings_clicked(self, _btn):
         dlg = GlobalSettingsDialog(self, self._settings)
