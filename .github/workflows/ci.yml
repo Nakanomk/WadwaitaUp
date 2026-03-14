@@ -88,11 +88,26 @@ jobs:
           python -m py_compile window.py
 
       # ── Verify GTK4 imports ────────────────────────────────────
+      # Each platform uses the Python interpreter that actually has
+      # the GTK4 bindings installed; this differs from setup-python's
+      # interpreter which lives in the toolcache and cannot see system
+      # or Homebrew packages.
 
-      - name: Verify GTK4 imports (Linux / macOS)
-        if: runner.os != 'Windows'
+      - name: Verify GTK4 imports (Linux)
+        if: runner.os == 'Linux'
         run: |
-          python -c "
+          /usr/bin/python3 -c "
+          import gi
+          gi.require_version('Gtk', '4.0')
+          gi.require_version('Adw', '1')
+          from gi.repository import Gtk, Adw
+          print('GTK4 + Libadwaita imported successfully')
+          "
+
+      - name: Verify GTK4 imports (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          "$(brew --prefix)/bin/python3" -c "
           import gi
           gi.require_version('Gtk', '4.0')
           gi.require_version('Adw', '1')
@@ -119,7 +134,7 @@ jobs:
         run: |
           import os, shutil, pathlib, zipfile
 
-          ref = os.environ.get("GITHUB_REF_NAME", "dev")
+          ref = os.environ.get("GITHUB_REF_NAME", "dev").replace("/", "-").replace("\\", "-")
           platform = "${{ matrix.platform }}"
           pkg_name = f"WadwaitaUp-{ref}-{platform}"
           pkg_dir  = pathlib.Path("dist") / pkg_name
@@ -151,7 +166,7 @@ jobs:
   # ── Publish GitHub Release (tag builds only, after approval) ──
   release:
     name: Release
-    needs: build
+    needs: [build, android]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
@@ -180,6 +195,52 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: packages/*.zip
+          files: packages/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  # ── Android APK build ─────────────────────────────────────────
+  android:
+    name: Build · android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Buildozer currently has the best compatibility with 3.11
+          python-version: '3.11'
+
+      - name: Install Buildozer system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            git zip unzip openjdk-17-jdk \
+            autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev cmake \
+            libffi-dev libssl-dev
+
+      - name: Install Buildozer and Cython
+        run: pip install --upgrade buildozer cython==3.0.11
+
+      # Cache the heavy Android SDK/NDK + p4a build artefacts so that
+      # subsequent runs finish in minutes instead of 30+ minutes.
+      - name: Cache Buildozer global directory
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-${{ runner.os }}
+          restore-keys: buildozer-
+
+      - name: Build Android APK (debug)
+        run: buildozer android debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-android
+          path: bin/*.apk
+          if-no-files-found: error
