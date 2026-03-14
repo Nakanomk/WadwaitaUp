@@ -2134,8 +2134,9 @@ class MonthView(Gtk.Box):
 
 
 class WadwaitaUpWindow(Adw.ApplicationWindow):
-    def __init__(self, app):
+    def __init__(self, app, version: str = "unknown"):
         super().__init__(application=app)
+        self._app_version = version
         self.set_title("WadwaitaUp 课程表")
         self.set_default_size(760, 800)
 
@@ -2208,6 +2209,11 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
 
         # Flag to prevent _on_dark_toggled re-entry during programmatic sync
         self._suppress_dark_toggle = False
+
+        about_btn = Gtk.Button(icon_name="help-about-symbolic")
+        about_btn.set_tooltip_text("关于 WadwaitaUp")
+        about_btn.connect("clicked", self._on_about_clicked)
+        header.pack_end(about_btn)
 
         export_cal_btn = Gtk.Button(icon_name="x-office-calendar-symbolic")
         export_cal_btn.set_tooltip_text("导出课程表到日历（.ics）")
@@ -2815,3 +2821,15 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         self._courses = [c for c in self._courses if c.id != course_id]
         self._persist_schedules()
         self.refresh_ui()
+
+    def _on_about_clicked(self, _btn):
+        dlg = Adw.AboutDialog(
+            application_name="WadwaitaUp",
+            application_icon="x-office-calendar-symbolic",
+            version=self._app_version,
+            comments="一个 Adwaita 风格的课程表应用",
+            website="https://github.com/Nakanomk/WadwaitaUp",
+            developer_name="Nakanomk",
+            license_type=Gtk.License.MIT_X11,
+        )
+        dlg.present(self)

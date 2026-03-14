@@ -1,4 +1,9 @@
 import sys
+import pathlib
+
+# Read version from the VERSION file bundled with the application
+_VERSION_FILE = pathlib.Path(__file__).with_name("VERSION")
+__version__ = _VERSION_FILE.read_text(encoding="utf-8").strip() if _VERSION_FILE.exists() else "unknown"
 
 try:
     import gi
@@ -34,7 +39,7 @@ class WadwaitaUpApp(Adw.Application):
     def on_activate(self, app):
         win = self.props.active_window
         if not win:
-            win = WadwaitaUpWindow(app)
+            win = WadwaitaUpWindow(app, version=__version__)
         win.present()
 
 
