@@ -69,6 +69,7 @@ class SettingsStorage:
         "current_schedule_id": None,
         "color_scheme": "auto",   # "auto" | "light" | "dark"
         "class_periods": DEFAULT_CLASS_PERIODS,
+        "time_schemes": [],       # list of TimeScheme dicts for auto period switching
         "onboarding_done": False,
     }
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field, asdict
+from datetime import date
 from typing import List
 
 # Default class periods for a typical Chinese university schedule
@@ -91,6 +92,57 @@ class Course:
             teacher=d.get("teacher", ""),
             weeks=d.get("weeks", "1-20"),
         )
+
+
+@dataclass
+class TimeScheme:
+    """A named set of class periods with an optional date range for auto-switching."""
+
+    name: str
+    date_from: str = ""   # "MM-DD", or "" for no start restriction
+    date_to: str = ""     # "MM-DD", or "" for no end restriction
+    periods: List[ClassPeriod] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "date_from": self.date_from,
+            "date_to": self.date_to,
+            "periods": [p.to_dict() for p in self.periods],
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "TimeScheme":
+        return TimeScheme(
+            name=d.get("name", ""),
+            date_from=d.get("date_from", ""),
+            date_to=d.get("date_to", ""),
+            periods=[ClassPeriod.from_dict(p) for p in d.get("periods", [])],
+        )
+
+    def is_active_on(self, check_date: date) -> bool:
+        """Return True if this scheme is active on check_date.
+
+        Both *date_from* and *date_to* must be non-empty for date-range checking.
+        If either field is empty the scheme is treated as always-active (no
+        date restriction), which is the expected behaviour for catch-all or
+        fallback schemes.
+        """
+        if not self.date_from or not self.date_to:
+            return True  # No date range → always active
+        try:
+            df_m, df_d = (int(x) for x in self.date_from.split("-"))
+            dt_m, dt_d = (int(x) for x in self.date_to.split("-"))
+            md = (check_date.month, check_date.day)
+            fm = (df_m, df_d)
+            tm = (dt_m, dt_d)
+            if fm <= tm:
+                return fm <= md <= tm
+            else:
+                # Wraps year boundary (e.g., Nov-01 to Feb-28)
+                return md >= fm or md <= tm
+        except Exception:
+            return False
 
 
 @dataclass
