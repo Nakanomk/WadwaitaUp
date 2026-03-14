@@ -235,6 +235,26 @@ jobs:
           key: buildozer-${{ hashFiles('buildozer.spec') }}-${{ runner.os }}
           restore-keys: buildozer-
 
+      # sdkmanager prompts interactively for license acceptance, which hangs
+      # in a non-TTY CI environment.  Pre-writing the well-known license hash
+      # files into Buildozer's SDK directory makes sdkmanager treat the
+      # licenses as already accepted, so build-tools installation proceeds
+      # without any prompt.
+      - name: Pre-accept Android SDK licenses
+        run: |
+          BUILDOZER_SDK="${HOME}/.buildozer/android/platform/android-sdk"
+          mkdir -p "${BUILDOZER_SDK}/licenses"
+          # Standard Android SDK license
+          printf '%s\n' \
+            '8933bad161af4178b1185d1a37fbf41ea5269c55' \
+            'd56f5187479451eabf01fb78af6dfcb131a6481e' \
+            '24333f8a63b6825ea9c5514f83c2829b004d1fee' \
+            > "${BUILDOZER_SDK}/licenses/android-sdk-license"
+          # Preview / RC packages license (required for build-tools rc releases)
+          printf '%s\n' \
+            '84831b9409646a918e30573bab4c9c91346d8abd' \
+            > "${BUILDOZER_SDK}/licenses/android-sdk-preview-license"
+
       - name: Build Android APK (debug)
         run: buildozer android debug
 

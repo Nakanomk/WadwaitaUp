@@ -19,7 +19,7 @@ requirements    = python3==3.11.0,kivy==2.3.0
 
 # UI / display
 orientation     = portrait
-fullscreen       = 0
+fullscreen      = 0
 
 # Android SDK / NDK targets
 android.api     = 33
