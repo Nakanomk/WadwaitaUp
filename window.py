@@ -1075,6 +1075,9 @@ class TimeSchemesDialog(Gtk.Dialog):
 class GlobalSettingsDialog(Gtk.Dialog):
     """Global settings: color scheme + class periods."""
 
+    _COLOR_SCHEMES = ["auto", "light", "dark"]
+    _SCHEME_LABELS = ["跟随系统（自动）", "浅色模式", "深色模式"]
+
     def __init__(self, parent: Gtk.Window, settings: dict):
         super().__init__(title="全局设置", modal=True, transient_for=parent)
         self.set_default_size(320, 160)
@@ -1093,15 +1096,18 @@ class GlobalSettingsDialog(Gtk.Dialog):
 
         # Color scheme ─────────────────────────────────────────────
         scheme_group = Adw.PreferencesGroup(title="外观")
-        scheme_row = Adw.ActionRow(title="深色模式")
-        self.dark_switch = Gtk.Switch()
-        self.dark_switch.set_valign(Gtk.Align.CENTER)
-        current = settings.get("color_scheme", "auto")
-        self.dark_switch.set_active(current == "dark")
-        self.dark_switch.connect("notify::active", self._on_dark_toggled)
-        scheme_row.add_suffix(self.dark_switch)
-        scheme_row.set_activatable_widget(self.dark_switch)
-        scheme_group.add(scheme_row)
+        color_options = Gtk.StringList()
+        for opt in self._SCHEME_LABELS:
+            color_options.append(opt)
+        current_scheme = settings.get("color_scheme", "auto")
+        self._scheme_row = Adw.ComboRow(title="配色方案")
+        self._scheme_row.set_model(color_options)
+        self._scheme_row.set_selected(
+            self._COLOR_SCHEMES.index(current_scheme)
+            if current_scheme in self._COLOR_SCHEMES else 0
+        )
+        self._scheme_row.connect("notify::selected", self._on_scheme_changed)
+        scheme_group.add(self._scheme_row)
         box.append(scheme_group)
 
         # Class periods ────────────────────────────────────────────
@@ -1147,16 +1153,12 @@ class GlobalSettingsDialog(Gtk.Dialog):
                 return scheme.name
         return "全局节次设置"
 
-    def _on_dark_toggled(self, switch, _param):
-        style_manager = Adw.StyleManager.get_default()
-        if switch.get_active():
-            style_manager.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
-            self._settings["color_scheme"] = "dark"
-        else:
-            style_manager.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
-            self._settings["color_scheme"] = "light"
-        # Notify parent to persist
-        self._parent.on_color_scheme_changed(self._settings["color_scheme"])
+    def _on_scheme_changed(self, row, _param):
+        idx = row.get_selected()
+        if 0 <= idx < len(self._COLOR_SCHEMES):
+            scheme = self._COLOR_SCHEMES[idx]
+            self._settings["color_scheme"] = scheme
+            self._parent.on_color_scheme_changed(scheme)
 
     def _on_edit_periods(self, _btn):
         periods = _periods_from_settings(self._settings)
@@ -2176,15 +2178,16 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         edit_schedule_btn.connect("clicked", self._on_edit_schedule_clicked)
         header.pack_start(edit_schedule_btn)
 
-        # ── Header: center – ViewSwitcher + schedule dropdown ───
+        # ── Header: center – ViewSwitcher ───────────────────────
         self._view_stack = Adw.ViewStack()
 
         # ViewSwitcher sits in the header centre
         view_switcher = Adw.ViewSwitcher()
         view_switcher.set_stack(self._view_stack)
         view_switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(view_switcher)
 
-        # Schedule switcher dropdown also lives in the centre box
+        # Schedule switcher dropdown lives in the header start group
         self._schedule_names_model = Gtk.StringList()
         self._rebuild_schedule_model()
         self._schedule_dropdown = Gtk.DropDown(
@@ -2193,12 +2196,7 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         )
         self._schedule_dropdown.set_tooltip_text("切换课表")
         self._schedule_dropdown.connect("notify::selected", self._on_schedule_switched)
-
-        center_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        center_box.set_halign(Gtk.Align.CENTER)
-        center_box.append(self._schedule_dropdown)
-        center_box.append(view_switcher)
-        header.set_title_widget(center_box)
+        header.pack_start(self._schedule_dropdown)
 
         # ── Header: right buttons ────────────────────────────────
         self._dark_btn = Gtk.ToggleButton(icon_name="weather-clear-night-symbolic")
@@ -2327,12 +2325,6 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             self._month_view, "month", "月视图"
         )
         p_month.set_icon_name("x-office-calendar-symbolic")
-
-        # ── Bottom switcher bar (shown on narrow windows) ────────
-        switcher_bar = Adw.ViewSwitcherBar()
-        switcher_bar.set_stack(self._view_stack)
-        switcher_bar.set_reveal(True)
-        toolbar_view.add_bottom_bar(switcher_bar)
 
         toolbar_view.set_content(self._view_stack)
         self.set_content(toolbar_view)
@@ -2553,7 +2545,7 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
     def _on_dark_toggled(self, btn):
         if self._suppress_dark_toggle:
             return
-        scheme = "dark" if btn.get_active() else "light"
+        scheme = "dark" if btn.get_active() else "auto"
         self._apply_color_scheme(scheme)
         self._settings["color_scheme"] = scheme
         self._persist_settings()
