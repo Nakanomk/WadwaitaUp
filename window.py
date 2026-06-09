@@ -135,6 +135,12 @@ _APP_CSS = """
     background-color: alpha(@accent_color, 0.35);
     margin: 0 4px;
 }
+
+/* ── Month pill (shared – avoids per-widget providers) ─────────── */
+.month-pill {
+    border-radius: 4px;
+    padding: 1px 3px;
+}
 """
 
 _CSS_LOADED = False
@@ -204,11 +210,15 @@ def _get_mascot_info(
     courses: list,
     current_week: int | None,
     conflicts: list | None = None,
-) -> tuple[str, str, str, bool]:
-    """Return (emoji, message, extra_css_class, is_markup) for the mascot card.
+) -> tuple[str, str, str, bool, object | None, int | None]:
+    """Return (emoji, message, extra_css_class, is_markup, next_course, delta).
 
     When *conflicts* is non-empty the message uses Pango markup (is_markup=True).
     All other messages are plain text (is_markup=False).
+
+    *next_course* and *delta* are computed as a side-effect of determining
+    the mascot message and returned so the caller can reuse them without
+    calling :func:`get_next_course` a second time.
     """
     now = datetime.now()
     hour = now.hour
@@ -249,7 +259,7 @@ def _get_mascot_info(
             f"{_format_minutes(overlap_start)} 到 {_format_minutes(overlap_end)} "
             f"之间安排冲突，请谨慎处理"
         )
-        return ("⚠️", msg, "mascot-card-warn", True)
+        return ("⚠️", msg, "mascot-card-warn", True, None, None)
 
     if not courses:
         return (
@@ -257,6 +267,7 @@ def _get_mascot_info(
             f"{greeting}！添加几门课程，开始规划你的学期吧。\n{context}",
             "",
             False,
+            None, None,
         )
 
     next_course, delta = get_next_course(courses)
@@ -269,6 +280,7 @@ def _get_mascot_info(
                 f"{greeting}！「{next_course.name}」现在正在上课。\n{context}",
                 "mascot-card-accent",
                 False,
+                next_course, delta,
             )
         if delta < 30:
             return (
@@ -276,6 +288,7 @@ def _get_mascot_info(
                 f"{greeting}！「{next_course.name}」还有 {delta} 分钟就要开始了，快准备一下！\n{context}",
                 "mascot-card-urgent",
                 False,
+                next_course, delta,
             )
         if delta < 90:
             return (
@@ -283,6 +296,7 @@ def _get_mascot_info(
                 f"{greeting}！「{next_course.name}」再过 {humanize_delta_minutes(delta)} 开始，别迟到哦。\n{context}",
                 "mascot-card-warn",
                 False,
+                next_course, delta,
             )
 
     if not today_courses:
@@ -291,6 +305,7 @@ def _get_mascot_info(
             f"{greeting}！今天没有课，好好休息一下吧。\n{context}",
             "mascot-card-happy",
             False,
+            next_course, delta,
         )
 
     if today_courses and next_course:
@@ -300,9 +315,10 @@ def _get_mascot_info(
             f"下一节「{next_course.name}」在 {next_course.start} 开始。\n{context}",
             "",
             False,
+            next_course, delta,
         )
 
-    return ("🌟", f"{greeting}！祝你今天学习愉快！\n{context}", "mascot-card-happy", False)
+    return ("🌟", f"{greeting}！祝你今天学习愉快！\n{context}", "mascot-card-happy", False, next_course, delta)
 
 
 # ─────────────────────── Period helpers ─────────────────────────
@@ -2091,17 +2107,9 @@ class MonthView(Gtk.Box):
             pill = Gtk.Label(label=(c.name[:5] + ("…" if len(c.name) > 5 else "")))
             pill.add_css_class("caption")
             pill.add_css_class(cls)
+            pill.add_css_class("month-pill")
             pill.set_halign(Gtk.Align.FILL)
             pill.set_xalign(0.0)
-
-            # Round the pill slightly
-            provider = Gtk.CssProvider()
-            provider.load_from_string(
-                "label { border-radius: 4px; padding: 1px 3px; }"
-            )
-            pill.get_style_context().add_provider(
-                provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 5
-            )
             box.append(pill)
 
         if len(day_courses) > 3:
@@ -2460,7 +2468,7 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             if is_course_active_this_week(c, current_week)
         ]
         conflicts = detect_conflicts(active_for_week)
-        emoji, msg, extra_cls, is_markup = _get_mascot_info(
+        emoji, msg, extra_cls, is_markup, mascot_next_course, mascot_delta = _get_mascot_info(
             self._courses, current_week, conflicts
         )
         self._mascot_emoji_lbl.set_text(emoji)
@@ -2492,7 +2500,9 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             self._term_row.set_title("未设置学期开始日期")
             self._term_row.set_subtitle("点击左上角铅笔图标编辑课表信息")
 
-        next_course, delta = get_next_course(self._courses)
+        # Reuse next_course / delta already computed by _get_mascot_info
+        next_course = mascot_next_course
+        delta = mascot_delta
         if next_course:
             self._next_row.set_title(next_course.name)
             self._next_row.set_subtitle(
@@ -2728,7 +2738,7 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         dlg.connect("response", on_response)
         dlg.present()
 
-    def _apply_imported_courses(self, new_courses: list):
+    def _apply_imported_courses(self, new_courses: list[Course]):
         """Add new_courses to the current schedule, handling name conflicts."""
         existing_names = {c.name for c in self._courses}
         conflict_names = sorted({

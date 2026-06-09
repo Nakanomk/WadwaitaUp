@@ -7,19 +7,23 @@ Supports:
 
 Both return (list[Course], list[str]) where the second element holds
 human-readable warning messages for any items that could not be parsed.
+
+iCalendar parser now supports RRULE (FREQ=WEEKLY) for recurring events,
+which is the standard way most calendar systems export weekly courses.
 """
 
 import json
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
-from models import Course
+from models import Course, ClassPeriod
 from utils import is_valid_hhmm
 
 # ── weekday name → 1-7 mapping ──────────────────────────────────
 
-_WEEKDAY_MAP: dict[str, int] = {
+_WEEKDAY_MAP: Dict[str, int] = {
     # Chinese
     "周一": 1, "星期一": 1, "一": 1,
     "周二": 2, "星期二": 2, "二": 2,
@@ -73,7 +77,7 @@ def _unfold(text: str) -> str:
     return re.sub(r'\r?\n[ \t]', '', text)
 
 
-def _parse_ics_dt(value: str) -> datetime | None:
+def _parse_ics_dt(value: str) -> Optional[datetime]:
     """Parse a DTSTART/DTEND value like 20240901T080000[Z] to datetime."""
     clean = value.replace('Z', '').replace('z', '')
     for fmt, length in [
@@ -88,23 +92,80 @@ def _parse_ics_dt(value: str) -> datetime | None:
     return None
 
 
-def parse_ics(text: str) -> tuple[list[Course], list[str]]:
+def _parse_rrule(rrule_str: str, dtstart: datetime) -> List[Tuple[int, int]]:
+    """Parse an RRULE line and return a list of (year, week_number) pairs.
+
+    Supports:
+      - FREQ=WEEKLY
+      - COUNT=N or UNTIL=YYYYMMDD
+      - INTERVAL=N (e.g. INTERVAL=2 for bi-weekly)
+      - BYDAY=MO,TU,… (returns the day-of-week info; caller must map to course day)
+
+    Returns an empty list if the rule cannot be parsed.
     """
-    Parse iCalendar text and return (courses, warnings).
+    result: List[Tuple[int, int]] = []
+
+    # Extract key parameters
+    freq_match = re.search(r'FREQ=(\w+)', rrule_str, re.IGNORECASE)
+    if not freq_match or freq_match.group(1).upper() != 'WEEKLY':
+        return result  # Only FREQ=WEEKLY is supported for courses
+
+    interval_match = re.search(r'INTERVAL=(\d+)', rrule_str, re.IGNORECASE)
+    interval = int(interval_match.group(1)) if interval_match else 1
+
+    count_match = re.search(r'COUNT=(\d+)', rrule_str, re.IGNORECASE)
+    count = int(count_match.group(1)) if count_match else None
+
+    until_match = re.search(r'UNTIL=(\d{8})', rrule_str, re.IGNORECASE)
+    until_dt: Optional[datetime] = None
+    if until_match:
+        until_dt = _parse_ics_dt(until_match.group(1))
+
+    # Compute the Monday of the week containing DTSTART
+    dtstart_date = dtstart.date()
+    monday = dtstart_date - timedelta(days=dtstart_date.weekday())
+
+    # Generate occurrences
+    week_num = 0
+    while True:
+        if count is not None and week_num >= count:
+            break
+
+        occurrence_date = monday + timedelta(weeks=week_num * interval)
+
+        if until_dt is not None:
+            if occurrence_date > until_dt.date():
+                break
+
+        # Compute ISO week number for display (approximate: which week of the term)
+        result.append((occurrence_date.year, occurrence_date.isocalendar()[1]))
+
+        week_num += 1
+
+    return result
+
+
+def parse_ics(text: str) -> Tuple[List[Course], List[str]]:
+    """Parse iCalendar text and return (courses, warnings).
 
     Each unique (name, weekday, start-time) combination produces exactly one
     Course object – weekly recurring events are deduplicated automatically.
+
+    Supports RRULE:FREQ=WEEKLY for recurring events. When an RRULE with
+    COUNT is present, the weeks field is set to the continuous range
+    (e.g. "1-16" for COUNT=16). Individual VEVENTs without RRULE are
+    still handled as before.
     """
     text = _unfold(text)
     events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', text,
                         re.DOTALL | re.IGNORECASE)
 
-    courses: list[Course] = []
-    warnings: list[str] = []
-    seen: set[tuple] = set()
+    courses: List[Course] = []
+    warnings: List[str] = []
+    seen: set[Tuple] = set()
 
     for event_text in events:
-        props: dict[str, str] = {}
+        props: Dict[str, str] = {}
         for line in event_text.splitlines():
             line = line.strip()
             if not line or ':' not in line:
@@ -157,6 +218,16 @@ def parse_ics(text: str) -> tuple[list[Course], list[str]]:
             if m:
                 weeks = m.group(1).strip()
 
+        # ── RRULE support ─────────────────────────────────────────
+        rrule_raw = props.get('RRULE', '')
+        if rrule_raw and 'FREQ=WEEKLY' in rrule_raw.upper():
+            count_m = re.search(r'COUNT=(\d+)', rrule_raw, re.IGNORECASE)
+            if count_m:
+                count = int(count_m.group(1))
+                weeks = f"1-{count}"
+            # For UNTIL-based RRULEs we keep the default weeks string
+            # since we don't know the term start date at import time.
+
         key = (summary, day, start)
         if key in seen:
             continue
@@ -178,9 +249,9 @@ def parse_ics(text: str) -> tuple[list[Course], list[str]]:
 
 # ── helpers for session time/day parsing ────────────────────────
 
-def _parse_session(session: dict, periods) -> tuple[int, str, str] | None:
-    """
-    Parse day/start/end from a session dict (or a top-level item dict).
+def _parse_session(session: Dict[str, Any], periods: Optional[List[ClassPeriod]]) \
+        -> Optional[Tuple[int, str, str]]:
+    """Parse day/start/end from a session dict (or a top-level item dict).
 
     Returns (day, start, end) on success, or None on failure.
     The caller is responsible for appending the appropriate warning via
@@ -193,7 +264,10 @@ def _parse_session(session: dict, periods) -> tuple[int, str, str] | None:
         if day is None:
             return None
     else:
-        day = int(day_raw)
+        try:
+            day = int(day_raw)
+        except (ValueError, TypeError):
+            return None
         if not 1 <= day <= 7:
             return None
 
@@ -201,7 +275,10 @@ def _parse_session(session: dict, periods) -> tuple[int, str, str] | None:
     if start_period is not None:
         if not periods:
             return None
-        sp_idx = int(start_period) - 1
+        try:
+            sp_idx = int(start_period) - 1
+        except (ValueError, TypeError):
+            return None
         if not (0 <= sp_idx < len(periods)):
             return None
         start = periods[sp_idx].start
@@ -214,7 +291,10 @@ def _parse_session(session: dict, periods) -> tuple[int, str, str] | None:
     if end_period is not None:
         if not periods:
             return None
-        ep_idx = int(end_period) - 1
+        try:
+            ep_idx = int(end_period) - 1
+        except (ValueError, TypeError):
+            return None
         if not (0 <= ep_idx < len(periods)):
             return None
         end = periods[ep_idx].end
@@ -226,7 +306,8 @@ def _parse_session(session: dict, periods) -> tuple[int, str, str] | None:
     return day, start, end
 
 
-def _parse_session_warning(session: dict, periods, label: str) -> str:
+def _parse_session_warning(session: Dict[str, Any], periods: Optional[List[ClassPeriod]],
+                           label: str) -> str:
     """Return a human-readable warning explaining why a session failed to parse."""
     day_raw = session.get('day', 1)
     if isinstance(day_raw, str):
@@ -235,7 +316,10 @@ def _parse_session_warning(session: dict, periods, label: str) -> str:
         if day is None:
             return f"{label} day 值「{day_raw}」无法识别，已跳过"
     else:
-        day = int(day_raw)
+        try:
+            day = int(day_raw)
+        except (ValueError, TypeError):
+            return f"{label} day 值无法解析为数字，已跳过"
         if not 1 <= day <= 7:
             return f"{label} day 值 {day} 超出范围 1-7，已跳过"
 
@@ -243,7 +327,10 @@ def _parse_session_warning(session: dict, periods, label: str) -> str:
     if start_period is not None:
         if not periods:
             return f"{label} 使用了 start_period，但未提供节次时间表，已跳过"
-        sp_idx = int(start_period) - 1
+        try:
+            sp_idx = int(start_period) - 1
+        except (ValueError, TypeError):
+            return f"{label} start_period 值无法解析：{start_period}，已跳过"
         if not (0 <= sp_idx < len(periods)):
             return (
                 f"{label} start_period {start_period} 超出范围"
@@ -258,7 +345,10 @@ def _parse_session_warning(session: dict, periods, label: str) -> str:
     if end_period is not None:
         if not periods:
             return f"{label} 使用了 end_period，但未提供节次时间表，已跳过"
-        ep_idx = int(end_period) - 1
+        try:
+            ep_idx = int(end_period) - 1
+        except (ValueError, TypeError):
+            return f"{label} end_period 值无法解析：{end_period}，已跳过"
         if not (0 <= ep_idx < len(periods)):
             return (
                 f"{label} end_period {end_period} 超出范围"
@@ -274,9 +364,9 @@ def _parse_session_warning(session: dict, periods, label: str) -> str:
 
 # ── JSON parser ──────────────────────────────────────────────────
 
-def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]]:
-    """
-    Parse a JSON array of course dicts and return (courses, warnings).
+def parse_json_courses(text: str, periods: Optional[List[ClassPeriod]] = None) \
+        -> Tuple[List[Course], List[str]]:
+    """Parse a JSON array of course dicts and return (courses, warnings).
 
     Each item must have at minimum "name" and either:
       a) Single-session format (legacy): "day", and either
@@ -289,7 +379,7 @@ def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]
     "day" may be an integer 1-7 (Mon=1) or a Chinese/English weekday name.
     *periods* is an optional list of ClassPeriod used to resolve period numbers.
     """
-    warnings: list[str] = []
+    warnings: List[str] = []
 
     try:
         data = json.loads(text)
@@ -299,7 +389,7 @@ def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]
     if not isinstance(data, list):
         return [], ["JSON 格式错误：根节点应为数组 [...]"]
 
-    courses: list[Course] = []
+    courses: List[Course] = []
 
     for idx, item in enumerate(data, start=1):
         if not isinstance(item, dict):
@@ -316,7 +406,7 @@ def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]
         teacher = str(item.get('teacher', '')).strip()
         weeks = str(item.get('weeks', '1-20')).strip()
 
-        # ── Multi-session format ──────────────────────────────────────
+        # ── Multi-session format ──────────────────────────────────
         if 'sessions' in item:
             sessions_raw = item['sessions']
             if not isinstance(sessions_raw, list):
@@ -350,7 +440,7 @@ def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]
                 ))
             continue
 
-        # ── Single-session format (legacy) ────────────────────────────
+        # ── Single-session format (legacy) ────────────────────────
         label = f"第 {idx} 项"
         parsed = _parse_session(item, periods)
         if parsed is None:
@@ -369,4 +459,3 @@ def parse_json_courses(text: str, periods=None) -> tuple[list[Course], list[str]
         ))
 
     return courses, warnings
-

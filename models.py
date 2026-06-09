@@ -1,6 +1,16 @@
 from dataclasses import dataclass, field, asdict
 from datetime import date
-from typing import List
+from typing import Any, Dict, List
+
+__all__ = [
+    "ClassPeriod",
+    "Course",
+    "TimeScheme",
+    "Schedule",
+    "DEFAULT_CLASS_PERIODS",
+    "HUST_SUMMER_PERIODS",
+    "HUST_WINTER_PERIODS",
+]
 
 # Default class periods – HUST (华中科技大学) summer schedule
 DEFAULT_CLASS_PERIODS = [
@@ -61,11 +71,11 @@ class ClassPeriod:
     def label(self) -> str:
         return f"第 {self.period} 节 {self.start}–{self.end}"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @staticmethod
-    def from_dict(d: dict) -> "ClassPeriod":
+    def from_dict(d: Dict[str, Any]) -> "ClassPeriod":
         return ClassPeriod(period=int(d["period"]), start=d["start"], end=d["end"])
 
 
@@ -80,11 +90,11 @@ class Course:
     teacher: str = ""
     weeks: str = "1-20"
 
-    def to_dict(self):
+    def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @staticmethod
-    def from_dict(d: dict):
+    def from_dict(d: Dict[str, Any]) -> "Course":
         return Course(
             id=d["id"],
             name=d["name"],
@@ -106,7 +116,7 @@ class TimeScheme:
     date_to: str = ""     # "MM-DD", or "" for no end restriction
     periods: List[ClassPeriod] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "date_from": self.date_from,
@@ -115,7 +125,7 @@ class TimeScheme:
         }
 
     @staticmethod
-    def from_dict(d: dict) -> "TimeScheme":
+    def from_dict(d: Dict[str, Any]) -> "TimeScheme":
         return TimeScheme(
             name=d.get("name", ""),
             date_from=d.get("date_from", ""),
@@ -156,7 +166,7 @@ class Schedule:
     total_weeks: int = 20
     courses: List[Course] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
@@ -166,7 +176,7 @@ class Schedule:
         }
 
     @staticmethod
-    def from_dict(d: dict) -> "Schedule":
+    def from_dict(d: Dict[str, Any]) -> "Schedule":
         return Schedule(
             id=d["id"],
             name=d["name"],

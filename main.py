@@ -16,6 +16,8 @@ except (ImportError, ValueError):
         "Error: GTK4 / Libadwaita libraries not found.\n\n"
         "Linux (Arch):\n"
         "  sudo pacman -Syu --needed python python-gobject gtk4 libadwaita\n\n"
+        "Linux (Fedora):\n"
+        "  sudo dnf install -y python3-gobject gtk4 libadwaita\n\n"
         "Linux (Debian/Ubuntu):\n"
         "  sudo apt install -y python3-gi python3-gi-cairo "
         "gir1.2-gtk-4.0 gir1.2-adw-1\n\n"

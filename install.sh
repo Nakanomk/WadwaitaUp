@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # install.sh – install WadwaitaUp dependencies for the current platform
+# Supports: Arch Linux, Debian/Ubuntu, Fedora, macOS, Windows/MSYS2
 
 set -e
 
@@ -10,14 +11,24 @@ case "$(uname -s)" in
     ;;
   Linux)
     if command -v pacman &>/dev/null; then
-      echo "Arch Linux detected..."
+      echo "Arch Linux (pacman) detected..."
       sudo pacman -Syu --needed python python-gobject gtk4 libadwaita
+    elif command -v dnf &>/dev/null; then
+      echo "Fedora (dnf) detected..."
+      sudo dnf install -y python3-gobject gtk4 libadwaita
     elif command -v apt &>/dev/null; then
-      echo "Debian/Ubuntu detected..."
+      echo "Debian/Ubuntu (apt) detected..."
       sudo apt update
       sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1
     else
-      echo "Unsupported Linux distribution. Please install GTK4, Libadwaita, and PyGObject manually."
+      echo "Unsupported Linux distribution."
+      echo "Please install GTK4, Libadwaita, and PyGObject manually."
+      echo ""
+      echo "  Arch:      sudo pacman -S python python-gobject gtk4 libadwaita"
+      echo "  Fedora:    sudo dnf install python3-gobject gtk4 libadwaita"
+      echo "  Debian:    sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1"
+      echo "  macOS:     brew install pygobject3 gtk4 libadwaita"
+      echo "  Windows:   (MSYS2) pacman -S mingw-w64-x86_64-python-gobject ..."
       exit 1
     fi
     ;;
