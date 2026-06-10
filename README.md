@@ -1,5 +1,5 @@
 <div align="center">
-<img src="icon.svg" width="96" alt="WadwaitaUp icon" />
+<img src="img/icon.svg" width="96" alt="WadwaitaUp icon" />
 
 # WadwaitaUp
 
@@ -67,7 +67,11 @@ A sleek, Libadwaita-themed course schedule manager for university students.
 
 ## 📸 预览 · Screenshots
 
-> *Screenshots coming soon — PRs welcome!*
+<p align="center">
+  <img src="img/ss0.png" width="45%" alt="概览视图" />
+  &nbsp;
+  <img src="img/ss1.png" width="45%" alt="周视图" />
+</p>
 
 ---
 

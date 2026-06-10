@@ -88,8 +88,8 @@ rsync -a --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
 chmod +x "$INSTALL_DIR/main.py"
 
 # Install icon
-if [ -f "$SCRIPT_DIR/icon.svg" ]; then
-  cp "$SCRIPT_DIR/icon.svg" "$ICON_DIR/com.nakanomk.WadwaitaUp.svg"
+if [ -f "$SCRIPT_DIR/img/icon.svg" ]; then
+  cp "$SCRIPT_DIR/img/icon.svg" "$ICON_DIR/com.nakanomk.WadwaitaUp.svg"
   echo "→ Icon installed"
 fi
 
