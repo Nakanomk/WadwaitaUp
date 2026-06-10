@@ -1,5 +1,5 @@
 <div align="center">
-<img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'%3E%3Crect width='96' height='96' rx='20' fill='%233584e4'/%3E%3Ctext x='48' y='62' font-size='48' text-anchor='middle' fill='white'%3E📅%3C/text%3E%3C/svg%3E" width="96" alt="WadwaitaUp icon" />
+<img src="icon.svg" width="96" alt="WadwaitaUp icon" />
 
 # WadwaitaUp
 
