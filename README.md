@@ -175,15 +175,51 @@ chmod +x main.py
 
 ### 📥 导入课程
 
-支持三种导入方式：
+支持四种导入方式，推荐使用内置浏览器一键导入：
 
-#### 1. iCalendar 文件（`.ics`）
+#### 1. 🌐 内置浏览器一键导入（推荐）
+
+点击顶栏 **🌐 按钮** → 打开内置浏览器 → 在页面中登录 HUSTPass → 点击左侧「课表信息」→ 切换到「总课表」标签 → 选择学期 → 点击右上角「📥 提取课程」→ 选择导入方式即可。
+
+> 💡 无需手动复制粘贴、无需 LLM 转换。课表数据自动提取、自动去重、自动转换。导入后自动提示设置学期开始日期。
+>
+> 需要安装 `webkit2gtk-4.1`（Arch 已默认安装），未安装时会自动提示安装命令。
+
+<details>
+<summary><b>🔧 备用方法：浏览器控制台 / Python 脚本</b></summary>
+
+**方法 A — 浏览器控制台：**
+
+1. 登录 [HUST HUB 系统](https://hubs.hust.edu.cn/basicInformation/scheduleInformation/index)
+2. 切换到「**总课表**」标签，选择学期，等待课表加载
+3. 按 `F12` 打开开发者工具，切换到 **Console** 面板
+4. 复制 [`tools/hust_converter.js`](tools/hust_converter.js) 全部内容，粘贴到控制台并回车
+5. 运行 `hustToWadwaitaUp.download()` — 自动下载 JSON 文件
+6. 在 WadwaitaUp 中导入该 JSON 文件
+
+> 💡 也支持 `hustToWadwaitaUp.copy()`（复制到剪贴板）或 `hustToWadwaitaUp.print()`（打印到控制台）
+
+**方法 B — Python 脚本：**
+
+1. 在 Network 面板找到 `getStudentScheduleByXqh` 请求
+2. 右键 → Copy → Copy response → 保存为 `hust_raw.json`
+3. 运行：
+
+```bash
+python tools/hust_converter.py hust_raw.json -o courses.json       # 夏令时（默认）
+python tools/hust_converter.py hust_raw.json --winter -o courses.json  # 冬令时
+python tools/hust_converter.py hust_raw.json --periods -o courses.json # 节次编号
+```
+
+</details>
+
+#### 2. iCalendar 文件（`.ics`）
 
 从教务系统导出的日历文件。自动识别 `DTSTART`/`DTEND`/`SUMMARY`/`LOCATION`/`DESCRIPTION`/`RRULE` 等字段，同名课程自动去重。
 
-#### 2. JSON 文件 / 粘贴
+#### 3. JSON 文件 / 粘贴
 
-点击 **导入课程** → **选择文件…** 或直接粘贴 JSON 到文本框 → **解析预览** → **导入**。
+点击 **🍔 菜单 → 导入课程** → **选择文件…** 或直接粘贴 JSON 到文本框 → **解析预览** → **导入**。
 
 <details>
 <summary><b>📋 JSON 格式说明</b></summary>
@@ -237,39 +273,6 @@ chmod +x main.py
 
 </details>
 
-#### 3. 🔧 从 HUST 教务系统一键导入（推荐）
-
-使用内置的转换脚本，一键从 HUB 系统提取课表数据：
-
-**方法 A — 浏览器控制台（推荐）：**
-
-1. 登录 [HUST HUB 系统](https://hubs.hust.edu.cn/basicInformation/scheduleInformation/index)
-2. 切换到「**总课表**」标签，选择学期，等待课表加载
-3. 按 `F12` 打开开发者工具，切换到 **Console** 面板
-4. 复制 [`tools/hust_converter.js`](tools/hust_converter.js) 全部内容，粘贴到控制台并回车
-5. 运行 `hustToWadwaitaUp.download()` — 自动下载 JSON 文件
-6. 在 WadwaitaUp 中导入该 JSON 文件
-
-> 💡 也支持 `hustToWadwaitaUp.copy()`（复制到剪贴板）或 `hustToWadwaitaUp.print()`（打印到控制台）
-
-**方法 B — Python 脚本：**
-
-1. 在 Network 面板找到 `getStudentScheduleByXqh` 请求
-2. 右键 → Copy → Copy response → 保存为 `hust_raw.json`
-3. 运行：
-
-```bash
-# 默认夏令时
-python tools/hust_converter.py hust_raw.json -o courses.json
-
-# 冬令时
-python tools/hust_converter.py hust_raw.json --winter -o courses.json
-
-# 输出节次编号（不包含具体时间，需在 WadwaitaUp 中配置节次表）
-python tools/hust_converter.py hust_raw.json --periods -o courses.json
-```
-
-> **选项说明：** `--summer` 夏令时（默认）| `--winter` 冬令时 | `--periods` 输出节次编号 | `-o` 输出文件
 
 ### 📤 导出到日历
 
