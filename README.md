@@ -30,6 +30,7 @@ A sleek, Libadwaita-themed course schedule manager for university students.
 - **月视图** — 日历热力图，每天课程一目了然
 
 **📥 灵活导入**
+- **🌐 内置浏览器一键导入（推荐）** — 嵌入式 WebView 自动登录教务系统，一键提取课表
 
 - **iCalendar (`.ics`)** — 从教务系统导出的日历文件直接导入，支持 `RRULE` 循环规则
 - **JSON** — 批量导入，支持单时段和多时段两种格式，可使用节次编号代替具体时间
@@ -40,6 +41,9 @@ A sleek, Libadwaita-themed course schedule manager for university students.
 
 **⏰ 智能提醒**
 吉祥物根据当前时间给出不同问候（早上好/午安/下午好/晚上好/夜深了），并在课程即将开始时提醒你。
+
+**📊 顶部状态栏**
+顶部居中显示当前日期、学期周次、今日剩余课程数。
 
 **🎨 深度 Libadwaita 集成**
 
@@ -71,7 +75,9 @@ A sleek, Libadwaita-themed course schedule manager for university students.
 
 ### 依赖项 · Dependencies
 
-WadwaitaUp 仅需 **GTK4**、**Libadwaita** 和 **PyGObject**（Python GObject 绑定）。
+WadwaitaUp 需要 **GTK4**、**Libadwaita** 和 **PyGObject**（Python GObject 绑定）。
+
+> 💡 推荐安装 **WebKitGTK 4.1**（`webkit2gtk-4.1`）以使用内置浏览器从教务系统一键导入课表。
 
 ### 一键安装
 
@@ -277,6 +283,7 @@ python tools/hust_converter.py hust_raw.json --periods -o courses.json
 
 - **深色模式** — 切换深色/浅色主题（也可在顶栏右侧快速切换）
 - **节次时间** — 自定义每节课的起止时间，提供 HUST 夏令时/冬令时预设
+- **强调色** — 10 种主题强调色可选，即时预览
 - **时间方案（令时）** — 创建多个节次表并设定各自生效的日期范围（MM-DD → MM-DD），系统根据当前日期自动选择
 
 ---
@@ -289,6 +296,7 @@ WadwaitaUp/
 ├── window.py        # 主窗口 + 所有对话框 + 周/月视图组件
 ├── models.py        # 数据模型 — Course, ClassPeriod, TimeScheme, Schedule
 ├── utils.py         # 工具函数 — 周次解析、冲突检测、ICS 导出、时间计算
+├── browser.py       # 内置浏览器 — WebKit WebView 嵌入式 HUST 课表导入
 ├── importer.py      # 导入器 — iCalendar (.ics) 和 JSON 解析
 ├── storage.py       # 持久化 — JSON 文件存储（原子写入）
 ├── install.sh       # 跨平台依赖安装脚本
