@@ -51,6 +51,7 @@ A sleek, Libadwaita-themed course schedule manager for university students.
 - 完整 CSS 自定义：课程卡片、吉祥物卡片、月历、引导页
 
 **🔧 高级功能**
+
 - **时间方案（令时）** — 配置夏令时/冬令时节次表，按日期自动切换
 - **节次快选** — 添加课程时从预设节次快速填充时间
 - **冲突检测** — 自动标出时间重叠的课程
@@ -86,6 +87,7 @@ bash install.sh
 ```bash
 sudo pacman -Syu --needed python python-gobject gtk4 libadwaita
 ```
+
 </details>
 
 <details>
@@ -94,6 +96,7 @@ sudo pacman -Syu --needed python python-gobject gtk4 libadwaita
 ```bash
 sudo dnf install -y python3-gobject gtk4 libadwaita
 ```
+
 </details>
 
 <details>
@@ -103,6 +106,7 @@ sudo dnf install -y python3-gobject gtk4 libadwaita
 sudo apt update
 sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1
 ```
+
 </details>
 
 <details>
@@ -111,6 +115,7 @@ sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1
 ```bash
 brew install pygobject3 gtk4 libadwaita
 ```
+
 </details>
 
 <details>
@@ -123,6 +128,7 @@ pacman -S mingw-w64-x86_64-python-gobject \
           mingw-w64-x86_64-gtk4 \
           mingw-w64-x86_64-libadwaita
 ```
+
 </details>
 
 ### 运行
@@ -245,6 +251,7 @@ chmod +x main.py
 1. 在 Network 面板找到 `getStudentScheduleByXqh` 请求
 2. 右键 → Copy → Copy response → 保存为 `hust_raw.json`
 3. 运行：
+
 ```bash
 # 默认夏令时
 python tools/hust_converter.py hust_raw.json -o courses.json
@@ -329,6 +336,6 @@ MIT © [Nakanomk](https://github.com/Nakanomk)
 
 <div align="center">
 
-**Made with ❤️ for HUST students — and university students everywhere.**
+**Claude 给我蹬爽了。**
 
 </div>

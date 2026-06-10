@@ -1,5 +1,5 @@
 {
-  "current_schedule_id": "760e3d41-7545-4224-b718-435c988e956d",
+  "current_schedule_id": "f4ad503c-0955-4385-8285-dc66eaf7d87a",
   "color_scheme": "light",
   "class_periods": [
     {
@@ -64,5 +64,6 @@
     }
   ],
   "time_schemes": [],
-  "onboarding_done": true
+  "onboarding_done": true,
+  "accent_color": "#3584e4"
 }
