@@ -74,7 +74,7 @@ _APP_CSS = """
 
 /* ── Mascot card ──────────────────────────────────────────────── */
 .mascot-card {
-    border-radius: 16px;
+    border-radius: 22px;
     padding: 14px 16px;
     background-color: alpha(@accent_color, 0.08);
     margin-bottom: 4px;
@@ -1118,6 +1118,33 @@ class GlobalSettingsDialog(Gtk.Dialog):
         scheme_row.add_suffix(self.dark_switch)
         scheme_row.set_activatable_widget(self.dark_switch)
         scheme_group.add(scheme_row)
+
+        # Accent color presets
+        accent_presets = [
+            ("#3584e4", "蓝色（默认）"),
+            ("#33d17a", "绿色"),
+            ("#e5a50a", "琥珀"),
+            ("#9141ac", "紫色"),
+            ("#ed333b", "红色"),
+            ("#ff7800", "橙色"),
+        ]
+        current_accent = settings.get("accent_color", "#3584e4")
+        accent_model = Gtk.StringList()
+        accent_idx = 0
+        for i, (color, label) in enumerate(accent_presets):
+            accent_model.append(f"{label}")
+            if color == current_accent:
+                accent_idx = i
+
+        accent_combo = Gtk.DropDown(model=accent_model, selected=accent_idx)
+        accent_combo.set_valign(Gtk.Align.CENTER)
+        accent_combo.set_tooltip_text("选择主题强调色")
+        accent_combo.connect("notify::selected", self._on_accent_changed, accent_presets)
+        accent_row = Adw.ActionRow(title="强调色", subtitle="自定义应用的主题颜色")
+        accent_row.add_suffix(accent_combo)
+        accent_row.set_activatable_widget(accent_combo)
+        scheme_group.add(accent_row)
+
         box.append(scheme_group)
 
         # Class periods ────────────────────────────────────────────
@@ -1173,6 +1200,13 @@ class GlobalSettingsDialog(Gtk.Dialog):
             self._settings["color_scheme"] = "light"
         # Notify parent to persist
         self._parent.on_color_scheme_changed(self._settings["color_scheme"])
+
+    def _on_accent_changed(self, combo, _param, presets: list):
+        idx = combo.get_selected()
+        if 0 <= idx < len(presets):
+            color = presets[idx][0]
+            self._settings["accent_color"] = color
+            self._parent.on_accent_changed(color)
 
     def _on_edit_periods(self, _btn):
         periods = _periods_from_settings(self._settings)
@@ -1809,6 +1843,12 @@ class WeekGridView(Gtk.Box):
             pidx, span = _get_period_span(course, self._periods)
             if pidx is None:
                 continue
+            # Outside term range → no courses at all
+            if displayed_week is None:
+                continue
+            # Course has ended → skip entirely
+            if is_course_ended(course, displayed_week):
+                continue
             is_active = is_course_active_this_week(course, displayed_week)
             all_items.append((course, course.day, pidx, span, is_active))
 
@@ -1992,6 +2032,8 @@ class MonthView(Gtk.Box):
         self._month: int  = date.today().month
         self._courses:   list = []
         self._color_map: dict = {}
+        self._term_start_date: str = ""
+        self._total_weeks: int = 0
 
         # ── Navigation bar ────────────────────────────────────
         nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -2044,9 +2086,12 @@ class MonthView(Gtk.Box):
 
     # ── public ──────────────────────────────────────────────────
 
-    def refresh(self, courses: list, color_map: dict) -> None:
+    def refresh(self, courses: list, color_map: dict,
+                term_start_date: str = "", total_weeks: int = 0) -> None:
         self._courses = courses
         self._color_map = color_map
+        self._term_start_date = term_start_date
+        self._total_weeks = total_weeks
         self._rebuild()
 
     # ── internals ───────────────────────────────────────────────
@@ -2067,15 +2112,43 @@ class MonthView(Gtk.Box):
         while len(matrix) < 6:
             matrix.append([0] * 7)
 
-        # courses_by_wd: 1-7 -> [courses on that weekday]
-        courses_by_wd: dict = {wd: [] for wd in range(1, 8)}
-        for c in self._courses:
-            courses_by_wd[c.day].append(c)
+        # Compute term_monday so we can determine which term-week
+        # each calendar day falls into
+        term_monday = None
+        current_week = None
+        if self._term_start_date:
+            try:
+                ts = datetime.strptime(self._term_start_date, "%Y-%m-%d").date()
+                term_monday = ts - timedelta(days=ts.weekday())
+                current_week = calc_current_week(self._term_start_date)
+            except (ValueError, TypeError):
+                pass
 
         for row, week in enumerate(matrix):
             for col, day_num in enumerate(week):
-                wd   = col + 1    # 1=Mon … 7=Sun
-                cell = self._make_cell(day_num, wd, today, courses_by_wd[wd])
+                wd = col + 1    # 1=Mon … 7=Sun
+
+                # Filter courses: must match weekday AND be active
+                # in the specific term-week this day falls into
+                day_courses = []
+                if day_num > 0:
+                    for c in self._courses:
+                        if c.day != wd:
+                            continue
+                        if is_course_ended(c, current_week):
+                            continue
+                        # Check if course runs in this day's term-week
+                        if term_monday:
+                            try:
+                                cell_date = date(self._year, self._month, day_num)
+                                week_num = (cell_date - term_monday).days // 7 + 1
+                                if week_num >= 1 and not is_course_active_this_week(c, week_num):
+                                    continue
+                            except ValueError:
+                                pass
+                        day_courses.append(c)
+
+                cell = self._make_cell(day_num, wd, today, day_courses)
                 self._grid.attach(cell, col, row, 1, 1)
 
     def _make_cell(self, day_num: int, wd: int, today: date,
@@ -2173,26 +2246,15 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         toolbar_view.add_top_bar(header)
 
-        # ── Header: left buttons ─────────────────────────────────
-        settings_btn = Gtk.Button(icon_name="emblem-system-symbolic")
-        settings_btn.set_tooltip_text("全局设置（节次时间 / 外观）")
-        settings_btn.connect("clicked", self._on_global_settings_clicked)
-        header.pack_start(settings_btn)
+        # ── Header: left — menu + schedule dropdown ─────────────
+        self._menu_btn = Gtk.MenuButton()
+        self._menu_btn.set_icon_name("open-menu-symbolic")
+        self._menu_btn.set_tooltip_text("更多选项")
+        self._menu_btn.add_css_class("flat")
+        self._menu_popover = self._build_secondary_menu()
+        self._menu_btn.set_popover(self._menu_popover)
+        header.pack_start(self._menu_btn)
 
-        edit_schedule_btn = Gtk.Button(icon_name="document-edit-symbolic")
-        edit_schedule_btn.set_tooltip_text("编辑当前课表信息")
-        edit_schedule_btn.connect("clicked", self._on_edit_schedule_clicked)
-        header.pack_start(edit_schedule_btn)
-
-        # ── Header: center – ViewSwitcher + schedule dropdown ───
-        self._view_stack = Adw.ViewStack()
-
-        # ViewSwitcher sits in the header centre
-        view_switcher = Adw.ViewSwitcher()
-        view_switcher.set_stack(self._view_stack)
-        view_switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
-
-        # Schedule switcher dropdown also lives in the centre box
         self._schedule_names_model = Gtk.StringList()
         self._rebuild_schedule_model()
         self._schedule_dropdown = Gtk.DropDown(
@@ -2201,54 +2263,46 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         )
         self._schedule_dropdown.set_tooltip_text("切换课表")
         self._schedule_dropdown.connect("notify::selected", self._on_schedule_switched)
+        header.pack_start(self._schedule_dropdown)
 
-        center_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        center_box.set_halign(Gtk.Align.CENTER)
-        center_box.append(self._schedule_dropdown)
-        center_box.append(view_switcher)
-        header.set_title_widget(center_box)
+        # "本周" button – visible only in week/month views
+        self._today_btn = Gtk.Button(label="回到本周")
+        self._today_btn.add_css_class("flat")
+        self._today_btn.set_tooltip_text("回到本周")
+        self._today_btn.set_visible(False)
+        self._today_btn.connect("clicked", self._on_header_today)
+        header.pack_start(self._today_btn)
 
-        # ── Header: right buttons ────────────────────────────────
-        self._dark_btn = Gtk.ToggleButton(icon_name="weather-clear-night-symbolic")
-        self._dark_btn.set_tooltip_text("切换深色/浅色模式")
-        self._dark_btn.set_active(self._settings.get("color_scheme", "auto") == "dark")
-        self._dark_btn.connect("toggled", self._on_dark_toggled)
-        header.pack_end(self._dark_btn)
+        # ── Header: center — status info ────────────────────────
+        self._header_info = Gtk.Label()
+        self._header_info.set_xalign(0.5)
+        self._header_info.set_justify(Gtk.Justification.CENTER)
+        self._header_info.add_css_class("heading")
+        header.set_title_widget(self._header_info)
 
-        # Flag to prevent _on_dark_toggled re-entry during programmatic sync
-        self._suppress_dark_toggle = False
+        # ── Header: right buttons ───────────────────────────────
+        add_btn = Gtk.Button(icon_name="list-add-symbolic")
+        add_btn.set_tooltip_text("添加课程")
+        add_btn.connect("clicked", self._on_add_clicked)
+        header.pack_end(add_btn)
+
+        color_btn = Gtk.Button(icon_name="preferences-color-symbolic")
+        color_btn.set_tooltip_text("调整配色")
+        color_btn.connect("clicked", self._on_color_quick_clicked)
+        header.pack_end(color_btn)
+
+        hust_btn = Gtk.Button(icon_name="network-server-symbolic")
+        hust_btn.set_tooltip_text("从 HUST 教务系统导入课表（内置浏览器自动提取）")
+        hust_btn.connect("clicked", self._on_hust_import_clicked)
+        header.pack_end(hust_btn)
 
         about_btn = Gtk.Button(icon_name="help-about-symbolic")
         about_btn.set_tooltip_text("关于 WadwaitaUp")
         about_btn.connect("clicked", self._on_about_clicked)
         header.pack_end(about_btn)
 
-        export_cal_btn = Gtk.Button(icon_name="x-office-calendar-symbolic")
-        export_cal_btn.set_tooltip_text("导出课程表到日历（.ics）")
-        export_cal_btn.connect("clicked", self._on_export_calendar_clicked)
-        header.pack_end(export_cal_btn)
-
-        add_btn = Gtk.Button(icon_name="list-add-symbolic")
-        add_btn.set_tooltip_text("添加课程")
-        add_btn.connect("clicked", self._on_add_clicked)
-        header.pack_end(add_btn)
-
-        import_btn = Gtk.Button(icon_name="document-save-symbolic")
-        import_btn.set_tooltip_text("导入课程（.ics / JSON）")
-        import_btn.connect("clicked", self._on_import_clicked)
-        header.pack_end(import_btn)
-
-        add_schedule_btn = Gtk.Button(icon_name="folder-new-symbolic")
-        add_schedule_btn.set_tooltip_text("新建课表")
-        add_schedule_btn.connect("clicked", self._on_add_schedule_clicked)
-        header.pack_end(add_schedule_btn)
-
-        self._del_schedule_btn = Gtk.Button(icon_name="edit-delete-symbolic")
-        self._del_schedule_btn.set_tooltip_text("删除当前课表")
-        self._del_schedule_btn.connect("clicked", self._on_delete_schedule_clicked)
-        header.pack_end(self._del_schedule_btn)
-
-        # ── View Stack: page 1 – Overview ────────────────────────
+        # ── View Stack ──────────────────────────────────────────
+        self._view_stack = Adw.ViewStack()
         overview_scroll = Gtk.ScrolledWindow()
         overview_scroll.set_policy(
             Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC
@@ -2345,6 +2399,9 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         toolbar_view.set_content(self._view_stack)
         self.set_content(toolbar_view)
 
+        # Show/hide "本周" button based on active view
+        self._view_stack.connect("notify::visible-child-name", self._on_view_changed)
+
         self.refresh_ui()
 
         # ── Show onboarding on first launch ──────────────────────
@@ -2373,6 +2430,171 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         for s in self._schedules:
             self._schedule_names_model.append(s.name)
 
+    # ── Header info label ────────────────────────────────────────
+
+    def _update_header_info(self):
+        """Refresh the centred header info text."""
+        from datetime import date as _date, datetime
+
+        today = _date.today()
+        now = datetime.now()
+        schedule = self._active_schedule
+        current_week = calc_current_week(schedule.term_start_date)
+        total_weeks = schedule.total_weeks
+
+        # Date
+        weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        wd = today.weekday()
+        date_part = f"{today.month}月{today.day}日 {weekday_cn[wd]}"
+
+        # Week
+        if current_week and current_week > 0:
+            week_part = f"第{current_week}/{total_weeks}周"
+        elif current_week == 0:
+            week_part = "学期即将开始"
+        else:
+            week_part = ""
+
+        # Course count
+        today_courses_list = [
+            c for c in get_today_courses(self._courses)
+            if is_course_active_this_week(c, current_week)
+        ]
+        today_total = len(today_courses_list)
+        current_min = now.hour * 60 + now.minute
+        remaining = sum(
+            1 for c in today_courses_list if hhmm_to_minutes(c.end) > current_min
+        ) if today_total > 0 else 0
+
+        if today_total > 0:
+            course_part = f"今日 {remaining}/{today_total} 节"
+        else:
+            course_part = "今日无课"
+
+        parts = [date_part]
+        if week_part:
+            parts.append(week_part)
+        parts.append(course_part)
+
+        self._header_info.set_text(" · ".join(parts))
+
+    # ── Secondary hamburger menu ─────────────────────────────────
+
+    def _build_secondary_menu(self) -> Gtk.Popover:
+        """Build the hamburger menu popover with secondary actions."""
+        popover = Gtk.Popover()
+        popover.set_has_arrow(True)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        vbox.set_margin_top(6)
+        vbox.set_margin_bottom(6)
+
+        # Helper: create a menu row with icon + label
+        def _row(icon: str, label: str, callback, destructive: bool = False) -> Gtk.Button:
+            btn = Gtk.Button()
+            btn.add_css_class("flat")
+            if destructive:
+                btn.add_css_class("destructive-action")
+
+            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            hbox.set_margin_top(8)
+            hbox.set_margin_bottom(8)
+            hbox.set_margin_start(12)
+            hbox.set_margin_end(12)
+
+            icon_w = Gtk.Image.new_from_icon_name(icon)
+            icon_w.set_pixel_size(18)
+            hbox.append(icon_w)
+
+            lbl = Gtk.Label(label=label)
+            lbl.set_xalign(0.0)
+            lbl.set_hexpand(True)
+            hbox.append(lbl)
+
+            btn.set_child(hbox)
+            btn.connect("clicked", lambda _b: (popover.popdown(), callback(_b)))
+            return btn
+
+        # ── Menu items ──────────────────────────────────────────
+        # Course management (primary actions moved from header)
+        vbox.append(_row("list-add-symbolic", "添加课程", self._on_add_clicked))
+        vbox.append(_row("document-save-symbolic", "导入课程 (.ics / JSON)", self._on_import_clicked))
+        vbox.append(_row("folder-new-symbolic", "新建课表", self._on_add_schedule_clicked))
+
+        sep0 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sep0.set_margin_top(4)
+        sep0.set_margin_bottom(4)
+        sep0.set_margin_start(8)
+        sep0.set_margin_end(8)
+        vbox.append(sep0)
+
+        # Settings
+        vbox.append(_row("emblem-system-symbolic", "全局设置", self._on_global_settings_clicked))
+
+        # Edit schedule
+        vbox.append(_row("document-edit-symbolic", "编辑当前课表", self._on_edit_schedule_clicked))
+
+        # Export calendar
+        vbox.append(_row("x-office-calendar-symbolic", "导出课程表 (.ics)", self._on_export_calendar_clicked))
+
+        # Separator
+        sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sep.set_margin_top(4)
+        sep.set_margin_bottom(4)
+        sep.set_margin_start(8)
+        sep.set_margin_end(8)
+        vbox.append(sep)
+
+        # Dark mode toggle
+        dark_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        dark_row.set_margin_top(8)
+        dark_row.set_margin_bottom(8)
+        dark_row.set_margin_start(12)
+        dark_row.set_margin_end(12)
+
+        dark_icon = Gtk.Image.new_from_icon_name("weather-clear-night-symbolic")
+        dark_icon.set_pixel_size(18)
+        dark_row.append(dark_icon)
+
+        dark_lbl = Gtk.Label(label="深色模式")
+        dark_lbl.set_xalign(0.0)
+        dark_lbl.set_hexpand(True)
+        dark_row.append(dark_lbl)
+
+        self._dark_switch = Gtk.Switch()
+        self._dark_switch.set_valign(Gtk.Align.CENTER)
+        is_dark = self._settings.get("color_scheme", "auto") == "dark"
+        self._dark_switch.set_active(is_dark)
+        self._dark_switch.connect("notify::active", self._on_dark_switched)
+        dark_row.append(self._dark_switch)
+
+        vbox.append(dark_row)
+
+        # Separator
+        sep2 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sep2.set_margin_top(4)
+        sep2.set_margin_bottom(4)
+        sep2.set_margin_start(8)
+        sep2.set_margin_end(8)
+        vbox.append(sep2)
+
+        # Delete schedule (destructive)
+        self._menu_del_btn = _row("user-trash-symbolic", "删除当前课表",
+                                   self._on_delete_schedule_clicked, destructive=True)
+        self._menu_del_btn.set_sensitive(len(self._schedules) > 1)
+        vbox.append(self._menu_del_btn)
+
+        popover.set_child(vbox)
+        return popover
+
+    # ── Dark mode toggle (from popover switch) ──────────────────
+
+    def _on_dark_switched(self, switch, _param):
+        scheme = "dark" if switch.get_active() else "light"
+        self._apply_color_scheme(scheme)
+        self._settings["color_scheme"] = scheme
+        self._persist_settings()
+
     def _persist_schedules(self):
         self._active_schedule.courses = sort_courses(self._active_schedule.courses)
         self._schedule_storage.save(self._schedules)
@@ -2397,10 +2619,18 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         self._settings["color_scheme"] = scheme
         self._apply_color_scheme(scheme)
         self._persist_settings()
-        # Keep the header toggle in sync without re-triggering _on_dark_toggled
-        self._suppress_dark_toggle = True
-        self._dark_btn.set_active(scheme == "dark")
-        self._suppress_dark_toggle = False
+        # Keep the popover switch in sync without re-triggering the handler
+        if hasattr(self, '_dark_switch') and self._dark_switch:
+            self._dark_switch.handler_block_by_func(self._on_dark_switched)
+            self._dark_switch.set_active(scheme == "dark")
+            self._dark_switch.handler_unblock_by_func(self._on_dark_switched)
+
+    def on_accent_changed(self, accent_color: str):
+        """Called by GlobalSettingsDialog when the user picks an accent color."""
+        self._settings["accent_color"] = accent_color
+        self._persist_settings()
+        # Reload CSS to apply new accent — rebuild the whole UI
+        self.refresh_ui()
 
     def on_periods_changed(self, periods_raw: list):
         """Called by GlobalSettingsDialog when periods are saved."""
@@ -2459,17 +2689,24 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         total_weeks = schedule.total_weeks
         current_week = calc_current_week(term_start)
 
+        # Update status pills
+        self._update_header_info()
+
         # Update delete-schedule button sensitivity (can't delete last schedule)
-        self._del_schedule_btn.set_sensitive(len(self._schedules) > 1)
+        if hasattr(self, '_menu_del_btn') and self._menu_del_btn:
+            self._menu_del_btn.set_sensitive(len(self._schedules) > 1)
 
         # ── Mascot card ─────────────────────────────────────────
         active_for_week = [
             c for c in self._courses
             if is_course_active_this_week(c, current_week)
+            and not is_course_ended(c, current_week)
         ]
         conflicts = detect_conflicts(active_for_week)
+        # Pass only non-ended courses so "next course" ignores finished ones
+        non_ended = [c for c in self._courses if not is_course_ended(c, current_week)]
         emoji, msg, extra_cls, is_markup, mascot_next_course, mascot_delta = _get_mascot_info(
-            self._courses, current_week, conflicts
+            non_ended, current_week, conflicts
         )
         self._mascot_emoji_lbl.set_text(emoji)
         if is_markup:
@@ -2555,18 +2792,12 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
             total_weeks=schedule.total_weeks,
         )
         color_map = _assign_colors(self._courses)
-        self._month_view.refresh(self._courses, color_map)
+        self._month_view.refresh(self._courses, color_map,
+                                 term_start_date=schedule.term_start_date,
+                                 total_weeks=schedule.total_weeks)
 
 
     # ── header button callbacks ──────────────────────────────────
-
-    def _on_dark_toggled(self, btn):
-        if self._suppress_dark_toggle:
-            return
-        scheme = "dark" if btn.get_active() else "light"
-        self._apply_color_scheme(scheme)
-        self._settings["color_scheme"] = scheme
-        self._persist_settings()
 
     def _on_export_calendar_clicked(self, _btn):
         schedule = self._active_schedule
@@ -2636,6 +2867,24 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
         self._active_idx = idx
         self._persist_settings()
         self.refresh_ui()
+
+    def _on_view_changed(self, stack, _param):
+        """Show the '本周' button only in week/month views."""
+        name = stack.get_visible_child_name()
+        self._today_btn.set_visible(name in ("week", "month"))
+
+    def _on_header_today(self, _btn):
+        """Jump the week/month view back to the current week/month."""
+        self._week_grid._week_offset = 0
+        name = self._view_stack.get_visible_child_name()
+        if name == "week":
+            self._week_grid._build(datetime.now().weekday() + 1)
+        elif name == "month":
+            from datetime import date as _d
+            t = _d.today()
+            self._month_view._year = t.year
+            self._month_view._month = t.month
+            self._month_view._rebuild()
 
     def _on_add_schedule_clicked(self, _btn):
         dlg = ScheduleDialog(self)
@@ -2724,6 +2973,171 @@ class WadwaitaUpWindow(Adw.ApplicationWindow):
 
     def _get_class_periods(self) -> list[ClassPeriod]:
         return get_active_periods(self._settings)
+
+    def _on_hust_import_clicked(self, _btn):
+        """Open the built-in HUST HUB browser for one-click course extraction."""
+        try:
+            from browser import HustImportWindow, raw_to_courses
+        except ImportError:
+            self._show_webkit_error()
+            return
+
+        win = HustImportWindow(parent=self)
+
+        def on_courses_extracted(browser_win, courses_raw: list, mode: str, term_start: str):
+            """Called when the user confirms extraction in the browser window."""
+            periods = self._get_class_periods()
+            new_courses = raw_to_courses(courses_raw, periods)
+
+            if mode == "overwrite":
+                self._active_schedule.courses = new_courses
+                self._persist_schedules()
+                self._maybe_prompt_term_date(term_start)
+                self.refresh_ui()
+            elif mode == "add":
+                self._apply_imported_courses(new_courses)
+                self._maybe_prompt_term_date(term_start)
+            elif mode == "new":
+                import uuid as _uuid
+                new_s = Schedule(
+                    id=str(_uuid.uuid4()),
+                    name="从 HUST 导入",
+                    term_start_date="",
+                    total_weeks=20,
+                    courses=new_courses,
+                )
+                self._schedules.append(new_s)
+                self._active_idx = len(self._schedules) - 1
+                self._rebuild_schedule_model()
+                self._schedule_dropdown.handler_block_by_func(self._on_schedule_switched)
+                self._schedule_dropdown.set_selected(self._active_idx)
+                self._schedule_dropdown.handler_unblock_by_func(self._on_schedule_switched)
+                self._schedule_storage.save(self._schedules)
+                self._persist_settings()
+                self._maybe_prompt_term_date(term_start)
+                self.refresh_ui()
+
+        win.connect("courses-extracted", on_courses_extracted)
+        win.present()
+
+    def _maybe_prompt_term_date(self, term_start: str):
+        """If the schedule has no term start date, prompt the user to set it."""
+        if self._active_schedule.term_start_date:
+            return  # Already set, nothing to do
+
+        from datetime import date as _date
+        today = _date.today()
+
+        dlg = Adw.MessageDialog(
+            transient_for=self,
+            heading="设置学期开始日期",
+            body=(
+                f"当前课表尚未设置学期开始日期。\n\n"
+                f"自动检测到的学期第一周开始日期为：\n"
+                f"「{term_start}」\n\n"
+                f"是否使用此日期？\n"
+                f"（也可后续通过「编辑课表」手动设置）"
+            ) if term_start else (
+                "当前课表尚未设置学期开始日期。\n"
+                "请通过「编辑课表」设置学期开始日期，\n"
+                "以便正确显示周次信息和学期进度。"
+            ),
+        )
+        dlg.add_response("skip", "稍后设置")
+        if term_start:
+            dlg.add_response("use", f"使用 {term_start}")
+            dlg.set_default_response("use")
+        else:
+            dlg.add_response("ok", "确定")
+            dlg.set_default_response("ok")
+        dlg.set_close_response("skip")
+
+        def on_response(d, response):
+            if response == "use" and term_start:
+                self._active_schedule.term_start_date = term_start
+                self._persist_schedules()
+                self.refresh_ui()
+            d.close()
+
+        dlg.connect("response", on_response)
+        dlg.present()
+
+    def _show_webkit_error(self):
+        """Show a dialog explaining how to install WebKitGTK."""
+        dlg = Adw.MessageDialog(
+            transient_for=self,
+            heading="需要安装 WebKitGTK",
+            body=(
+                "从 HUST 导入功能需要 WebKitGTK 4.1。\n\n"
+                "安装命令：\n"
+                "  Arch:     sudo pacman -S webkit2gtk-4.1\n"
+                "  Fedora:   sudo dnf install webkit2gtk4.1\n"
+                "  Debian:   sudo apt install libwebkit2gtk-4.1-0\n\n"
+                "安装后重启 WadwaitaUp 即可使用。"
+            ),
+        )
+        dlg.add_response("ok", "确定")
+        dlg.connect("response", lambda d, _r: d.close())
+        dlg.present()
+
+    def _on_color_quick_clicked(self, source_btn):
+        """Show a quick color palette popover next to the palette button."""
+        popover = Gtk.Popover()
+        popover.set_has_arrow(True)
+
+        grid = Gtk.Grid()
+        grid.set_row_spacing(4)
+        grid.set_column_spacing(4)
+        grid.set_margin_top(8)
+        grid.set_margin_bottom(8)
+        grid.set_margin_start(8)
+        grid.set_margin_end(8)
+
+        accent_presets = [
+            "#3584e4", "#33d17a", "#e5a50a", "#9141ac", "#ed333b", "#ff7800",
+            "#1b6acb", "#26a269", "#986a44", "#c64600",
+        ]
+
+        current_accent = self._settings.get("accent_color", "#3584e4")
+
+        for i, color in enumerate(accent_presets):
+            swatch = Gtk.Button()
+            swatch.set_size_request(28, 28)
+            swatch.add_css_class("flat")
+
+            # Apply the color as inline CSS
+            css_provider = Gtk.CssProvider()
+            css_provider.load_from_string(
+                f"button {{ background-color: {color}; border-radius: 14px; "
+                f"min-width: 28px; min-height: 28px; margin: 2px; }}"
+            )
+            swatch.get_style_context().add_provider(
+                css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+
+            # Mark current selection
+            if color == current_accent:
+                swatch.set_tooltip_text(f"{color}（当前）")
+            else:
+                swatch.set_tooltip_text(color)
+
+            swatch.connect("clicked", lambda _b, c=color, p=popover: (
+                p.popdown(),
+                self._apply_accent(c),
+            ))
+
+            row, col = divmod(i, 5)
+            grid.attach(swatch, col, row, 1, 1)
+
+        popover.set_child(grid)
+        popover.set_parent(source_btn)
+        popover.popup()
+
+    def _apply_accent(self, color: str):
+        """Apply an accent color and persist it."""
+        self._settings["accent_color"] = color
+        self._persist_settings()
+        self.refresh_ui()
 
     def _on_import_clicked(self, _btn):
         dlg = ImportCoursesDialog(self, class_periods=self._get_class_periods())
